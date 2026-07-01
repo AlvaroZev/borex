@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
+from borex.data.mtf import MultiTimeframeContext
 from borex.models.candle import Candle, Signal, SignalAction
 from borex.patterns import candlestick as pat
 from borex.patterns.candlestick import avg_body
 from borex.strategy.base import Strategy
+
+FilterMode = Literal["trend", "off"]
 
 
 @dataclass
@@ -14,9 +18,11 @@ class CandlePatternStrategy(Strategy):
     Estrategia basada en patrones de velas japonesas.
 
     Puedes activar/desactivar patrones y definir cuáles son alcistas o bajistas.
+    Con MTF activo, filtra señales según la vela cerrada del timeframe superior.
     """
 
     name: str = "candle_patterns"
+    filter_mode: FilterMode = "trend"
     enabled_patterns: set[str] = field(
         default_factory=lambda: {
             "hammer",
@@ -30,7 +36,26 @@ class CandlePatternStrategy(Strategy):
         }
     )
 
-    def on_bar(self, index: int, candles: list[Candle]) -> Signal | None:
+    def _passes_mtf_filter(
+        self,
+        action: SignalAction,
+        mtf: MultiTimeframeContext | None,
+        index: int,
+    ) -> bool:
+        if mtf is None or self.filter_mode == "off":
+            return True
+
+        if self.filter_mode == "trend":
+            return mtf.all_filters_align(index, action)
+
+        return True
+
+    def on_bar(
+        self,
+        index: int,
+        candles: list[Candle],
+        mtf: MultiTimeframeContext | None = None,
+    ) -> Signal | None:
         if index < 2:
             return None
 
@@ -79,6 +104,8 @@ class CandlePatternStrategy(Strategy):
 
         for pattern_name, action, matched in checks:
             if matched and pattern_name in self.enabled_patterns:
+                if not self._passes_mtf_filter(action, mtf, index):
+                    continue
                 return Signal(
                     action=action,
                     pattern=pattern_name,

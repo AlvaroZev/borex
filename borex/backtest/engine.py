@@ -1,20 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from borex.backtest.portfolio import Portfolio, Trade
+from borex.backtest.costs import TradeCosts, apply_entry_fill, apply_exit_fill, infer_pip_size
+from borex.backtest.portfolio import Portfolio, PositionSide, Trade
 from borex.models.candle import Candle, Signal, SignalAction
 from borex.strategy.base import Strategy
+
+if TYPE_CHECKING:
+    from borex.data.mtf import MultiTimeframeContext
 
 
 @dataclass
 class BacktestConfig:
     initial_capital: float = 10_000.0
     position_size_pct: float = 1.0
+    leverage: float = 1.0
+    maintenance_margin_ratio: float = 0.0  # stop-out: equity <= margin × ratio
+    inversed: bool = False
     stop_loss_pct: float | None = 0.02  # 2% stop loss
     take_profit_pct: float | None = 0.04  # 4% take profit
     close_on_opposite_signal: bool = True
-    commission_pct: float = 0.0
+    spread_pips: float = 0.0
+    slippage_pips: float = 0.0
+    commission_per_trade: float = 0.0
+    pip_size: float | None = None  # auto desde símbolo si None
 
 
 @dataclass
@@ -31,19 +42,38 @@ class BacktestResult:
     winning_trades: int
     losing_trades: int
     max_drawdown_pct: float
+    filter_intervals: list[str] | None = None
+    total_commission: float = 0.0
     equity_curve: list[float] = field(default_factory=list)
 
     def summary(self) -> str:
+        tf = self.timeframe
+        if self.filter_intervals:
+            filt = "+".join(self.filter_intervals)
+            tf = f"{self.timeframe} (filtro: {filt})"
         lines = [
             f"Estrategia: {self.strategy_name}",
-            f"Símbolo: {self.symbol} ({self.timeframe})",
+            f"Símbolo: {self.symbol} ({tf})",
             f"Capital inicial: ${self.config.initial_capital:,.2f}",
+            f"Apalancamiento: {self.config.leverage:g}x",
+            f"Invertido: {'sí' if self.config.inversed else 'no'}",
             f"Capital final: ${self.final_equity:,.2f}",
             f"Retorno total: {self.total_return_pct:.2%}",
             f"Max drawdown: {self.max_drawdown_pct:.2%}",
             f"Trades: {self.total_trades} (W: {self.winning_trades} / L: {self.losing_trades})",
             f"Win rate: {self.win_rate:.2%}",
         ]
+        if (
+            self.config.spread_pips
+            or self.config.slippage_pips
+            or self.config.commission_per_trade
+        ):
+            lines.append(
+                f"Costos: spread {self.config.spread_pips:g} pips | "
+                f"slippage {self.config.slippage_pips:g} pips | "
+                f"comisión ${self.config.commission_per_trade:.2f}/trade"
+            )
+            lines.append(f"Comisión total pagada: ${self.total_commission:,.2f}")
         return "\n".join(lines)
 
 
@@ -51,55 +81,138 @@ class BacktestEngine:
     def __init__(self, strategy: Strategy, config: BacktestConfig | None = None):
         self.strategy = strategy
         self.config = config or BacktestConfig()
+        self._costs: TradeCosts | None = None
+        self._total_commission: float = 0.0
+
+    def _trade_costs(self, symbol: str) -> TradeCosts:
+        pip = self.config.pip_size or infer_pip_size(symbol)
+        return TradeCosts(
+            spread_pips=self.config.spread_pips,
+            slippage_pips=self.config.slippage_pips,
+            commission_per_trade=self.config.commission_per_trade,
+            pip_size=pip,
+        )
+
+    def _fill_entry(self, mid_price: float, side) -> float:
+        assert self._costs is not None
+        return apply_entry_fill(mid_price, side, self._costs)
+
+    def _fill_exit(self, mid_price: float, side) -> float:
+        assert self._costs is not None
+        return apply_exit_fill(mid_price, side, self._costs)
+
+    def _close_with_costs(
+        self,
+        portfolio: Portfolio,
+        index: int,
+        mid_price: float,
+        timestamp: object,
+        reason: str,
+    ) -> None:
+        trade = portfolio.open_trade
+        if trade is None:
+            return
+        fill = self._fill_exit(mid_price, trade.side)
+        portfolio.close_position(index, fill, timestamp, reason)
+        commission = self.config.commission_per_trade
+        if commission > 0 and portfolio.closed_trades:
+            closed = portfolio.closed_trades[-1]
+            closed.commission = commission
+            portfolio.charge_commission(commission)
+            self._total_commission += commission
 
     def run(
         self,
         candles: list[Candle],
         symbol: str = "UNKNOWN",
         timeframe: str = "1d",
+        mtf: MultiTimeframeContext | None = None,
     ) -> BacktestResult:
+        self._costs = self._trade_costs(symbol)
+        self._total_commission = 0.0
         portfolio = Portfolio(
             initial_capital=self.config.initial_capital,
             position_size_pct=self.config.position_size_pct,
+            leverage=self.config.leverage,
+            maintenance_margin_ratio=self.config.maintenance_margin_ratio,
         )
         equity_curve: list[float] = [portfolio.equity]
         peak_equity = portfolio.equity
+        max_dd = 0.0
 
         for i in range(len(candles)):
+            if portfolio.liquidated:
+                break
+
             candle = candles[i]
 
-            # Gestionar stop loss / take profit en la vela actual
+            # Gestionar liquidación / stop loss / take profit en la vela actual
             if portfolio.open_trade is not None:
                 closed = self._check_exit_levels(portfolio, i, candle)
-                if closed:
-                    equity_curve.append(portfolio.equity)
-                    peak_equity = max(peak_equity, portfolio.equity)
+                eq_close, eq_worst = self._equity_snapshot(portfolio, candle)
+                equity_curve.append(eq_close)
+                peak_equity, max_dd = self._update_drawdown(
+                    peak_equity, max_dd, eq_close, eq_worst
+                )
+                if closed or portfolio.liquidated:
                     continue
 
-            signal = self.strategy.on_bar(i, candles)
+            signal = self.strategy.on_bar(i, candles, mtf)
             if signal is None:
-                equity_curve.append(portfolio.equity)
-                peak_equity = max(peak_equity, portfolio.equity)
+                eq_close, eq_worst = self._equity_snapshot(portfolio, candle)
+                equity_curve.append(eq_close)
+                peak_equity, max_dd = self._update_drawdown(
+                    peak_equity, max_dd, eq_close, eq_worst
+                )
                 continue
 
             self._handle_signal(portfolio, signal, i, candles)
-            equity_curve.append(portfolio.equity)
-            peak_equity = max(peak_equity, portfolio.equity)
+            eq_close, eq_worst = self._equity_snapshot(portfolio, candle)
+            equity_curve.append(eq_close)
+            peak_equity, max_dd = self._update_drawdown(
+                peak_equity, max_dd, eq_close, eq_worst
+            )
 
         # Cerrar posición abierta al final del backtest
         if portfolio.open_trade is not None:
             last = candles[-1]
-            portfolio.close_position(
+            self._close_with_costs(
+                portfolio,
                 len(candles) - 1,
                 last.close,
                 last.timestamp,
-                reason="end_of_data",
+                "end_of_data",
             )
             equity_curve.append(portfolio.equity)
 
         return self._build_result(
-            portfolio, equity_curve, peak_equity, symbol, timeframe
+            portfolio, equity_curve, max_dd, symbol, timeframe, mtf
         )
+
+    def _equity_snapshot(
+        self, portfolio: Portfolio, candle: Candle
+    ) -> tuple[float, float]:
+        eq_close = self._mark_equity(portfolio, candle)
+        if portfolio.open_trade is None:
+            return eq_close, eq_close
+        eq_worst = portfolio.equity_at_adverse(candle.low, candle.high)
+        return eq_close, eq_worst
+
+    @staticmethod
+    def _update_drawdown(
+        peak: float, max_dd: float, eq_close: float, eq_worst: float
+    ) -> tuple[float, float]:
+        peak = max(peak, eq_close)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - eq_worst) / peak)
+        return peak, max_dd
+
+    def _effective_action(self, action: SignalAction) -> SignalAction:
+        if not self.config.inversed or action == SignalAction.HOLD:
+            return action
+        if action == SignalAction.BUY:
+            return SignalAction.SELL
+        return SignalAction.BUY
 
     def _handle_signal(
         self,
@@ -113,29 +226,52 @@ class BacktestEngine:
             return
 
         next_candle = candles[index + 1]
-        exec_price = next_candle.open
+        mid_price = next_candle.open
         exec_index = index + 1
+        action = self._effective_action(signal.action)
 
         if portfolio.open_trade is not None and self.config.close_on_opposite_signal:
             current = portfolio.open_trade
             is_opposite = (
-                current.side.value == "long" and signal.action == SignalAction.SELL
+                current.side.value == "long" and action == SignalAction.SELL
             ) or (
-                current.side.value == "short" and signal.action == SignalAction.BUY
+                current.side.value == "short" and action == SignalAction.BUY
             )
             if is_opposite:
-                portfolio.close_position(
-                    exec_index, exec_price, next_candle.timestamp, reason="opposite_signal"
+                self._close_with_costs(
+                    portfolio,
+                    exec_index,
+                    mid_price,
+                    next_candle.timestamp,
+                    "opposite_signal",
                 )
 
-        if portfolio.open_trade is None and signal.action != SignalAction.HOLD:
+        if portfolio.can_open() and action != SignalAction.HOLD:
+            side = PositionSide.LONG if action == SignalAction.BUY else PositionSide.SHORT
+            exec_price = self._fill_entry(mid_price, side)
+            stop_loss = signal.stop_loss
+            take_profit = signal.take_profit
+            if (
+                self.config.inversed
+                and stop_loss is not None
+                and take_profit is not None
+            ):
+                stop_loss, take_profit = take_profit, stop_loss
             portfolio.open_position(
-                signal.action,
+                action,
                 exec_index,
                 exec_price,
                 next_candle.timestamp,
                 signal.pattern,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                score=signal.score,
             )
+
+    def _mark_equity(self, portfolio: Portfolio, candle: Candle) -> float:
+        if portfolio.open_trade is None:
+            return portfolio.equity
+        return portfolio.equity_at(candle.close)
 
     def _check_exit_levels(
         self, portfolio: Portfolio, index: int, candle: Candle
@@ -144,28 +280,52 @@ class BacktestEngine:
         if trade is None:
             return False
 
+        liq_price = portfolio.liquidation_price()
+        adverse = portfolio.adverse_price(candle.low, candle.high)
+        if liq_price is not None and portfolio.is_margin_call_at(adverse):
+            self._close_with_costs(
+                portfolio, index, liq_price, candle.timestamp, "liquidation"
+            )
+            return True
+
         sl = self.config.stop_loss_pct
         tp = self.config.take_profit_pct
 
         if trade.side.value == "long":
-            sl_price = trade.entry_price * (1 - sl) if sl else None
-            tp_price = trade.entry_price * (1 + tp) if tp else None
+            sl_price = trade.stop_loss
+            tp_price = trade.take_profit
+            if sl_price is None and sl:
+                sl_price = trade.entry_price * (1 - sl)
+            if tp_price is None and tp:
+                tp_price = trade.entry_price * (1 + tp)
 
             if sl_price and candle.low <= sl_price:
-                portfolio.close_position(index, sl_price, candle.timestamp, "stop_loss")
+                self._close_with_costs(
+                    portfolio, index, sl_price, candle.timestamp, "stop_loss"
+                )
                 return True
             if tp_price and candle.high >= tp_price:
-                portfolio.close_position(index, tp_price, candle.timestamp, "take_profit")
+                self._close_with_costs(
+                    portfolio, index, tp_price, candle.timestamp, "take_profit"
+                )
                 return True
         else:
-            sl_price = trade.entry_price * (1 + sl) if sl else None
-            tp_price = trade.entry_price * (1 - tp) if tp else None
+            sl_price = trade.stop_loss
+            tp_price = trade.take_profit
+            if sl_price is None and sl:
+                sl_price = trade.entry_price * (1 + sl)
+            if tp_price is None and tp:
+                tp_price = trade.entry_price * (1 - tp)
 
             if sl_price and candle.high >= sl_price:
-                portfolio.close_position(index, sl_price, candle.timestamp, "stop_loss")
+                self._close_with_costs(
+                    portfolio, index, sl_price, candle.timestamp, "stop_loss"
+                )
                 return True
             if tp_price and candle.low <= tp_price:
-                portfolio.close_position(index, tp_price, candle.timestamp, "take_profit")
+                self._close_with_costs(
+                    portfolio, index, tp_price, candle.timestamp, "take_profit"
+                )
                 return True
 
         return False
@@ -174,24 +334,17 @@ class BacktestEngine:
         self,
         portfolio: Portfolio,
         equity_curve: list[float],
-        peak_equity: float,
+        max_dd: float,
         symbol: str,
         timeframe: str,
+        mtf: MultiTimeframeContext | None = None,
     ) -> BacktestResult:
         trades = portfolio.closed_trades
         winners = [t for t in trades if t.pnl > 0]
         losers = [t for t in trades if t.pnl <= 0]
 
-        max_dd = 0.0
-        peak = equity_curve[0] if equity_curve else portfolio.initial_capital
-        for eq in equity_curve:
-            peak = max(peak, eq)
-            if peak > 0:
-                dd = (peak - eq) / peak
-                max_dd = max(max_dd, dd)
-
         initial = self.config.initial_capital
-        final = portfolio.equity
+        final = max(0.0, portfolio.cash)
         total_return = (final - initial) / initial if initial else 0.0
         win_rate = len(winners) / len(trades) if trades else 0.0
 
@@ -199,6 +352,7 @@ class BacktestEngine:
             strategy_name=self.strategy.name,
             symbol=symbol,
             timeframe=timeframe,
+            filter_intervals=mtf.filter_intervals if mtf else None,
             config=self.config,
             trades=trades,
             final_equity=final,
@@ -208,5 +362,6 @@ class BacktestEngine:
             winning_trades=len(winners),
             losing_trades=len(losers),
             max_drawdown_pct=max_dd,
+            total_commission=self._total_commission,
             equity_curve=equity_curve,
         )

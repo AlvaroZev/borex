@@ -55,3 +55,6 @@ class Signal:
     index: int
     price: float
     timestamp: object
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    score: float = 0.0

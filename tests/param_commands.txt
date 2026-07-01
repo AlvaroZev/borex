@@ -1,0 +1,89 @@
+# Parameter sweep — return comparison (not pass/fail validation)
+# Format: ID|GROUP|COMMAND|LABEL
+# Run: powershell -File tests/run_param_sweep.ps1 -Execute -UseCache
+
+# --- Candles: SL/TP grid (GBPUSD 60d 1h) ---
+R001|sl_tp|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.005 --take-profit 0.01|Scalp SL0.5 TP1
+R002|sl_tp|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02|Tight SL1 TP2
+R003|sl_tp|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.015 --take-profit 0.03|Medium SL1.5 TP3
+R004|sl_tp|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.02 --take-profit 0.04|Default SL2 TP4
+R005|sl_tp|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.03 --take-profit 0.06|Wide SL3 TP6
+R006|sl_tp|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.04|Asymmetric SL1 TP4
+R007|sl_tp|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.02 --take-profit 0.02|1:1 SL2 TP2
+
+# --- Candles: leverage (fixed SL1 TP2) ---
+R010|leverage|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 -l 1|Lev 1x
+R011|leverage|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 -l 2|Lev 2x
+R012|leverage|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 -l 5|Lev 5x
+R013|leverage|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 -l 10|Lev 10x
+R014|leverage|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 -l 25|Lev 25x
+R015|leverage|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 -l 50|Lev 50x
+
+# --- Candles: MTF filter ---
+R020|mtf|python main.py -s "GBPUSD=X" -p 60d -i 1h|No MTF
+R021|mtf|python main.py -s "GBPUSD=X" -p 60d -i 1h -f --filter-mode trend|MTF trend
+R022|mtf|python main.py -s "GBPUSD=X" -p 60d -i 1h -f --filter-mode off|MTF off filter
+R023|mtf|python main.py -s "GBPUSD=X" -p 60d -i 1h -f --stop-loss 0.01 --take-profit 0.02|MTF + SL1 TP2
+
+# --- Candles: trade costs ---
+R030|costs|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02|Zero costs
+R031|costs|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 --spread-pips 1|Spread 1pip
+R032|costs|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 --spread-pips 2|Spread 2pip
+R033|costs|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 --spread-pips 2 --slippage-pips 0.5 --commission 3|Realistic retail
+R034|costs|python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 --spread-pips 2 --slippage-pips 0.5 --commission 3 -f|Realistic + MTF
+
+# --- Candles: single patterns ---
+R040|patterns|python main.py -s "GBPUSD=X" -p 60d -i 1h --patterns hammer|hammer
+R041|patterns|python main.py -s "GBPUSD=X" -p 60d -i 1h --patterns shooting_star|shooting_star
+R042|patterns|python main.py -s "GBPUSD=X" -p 60d -i 1h --patterns bullish_engulfing|bullish_engulfing
+R043|patterns|python main.py -s "GBPUSD=X" -p 60d -i 1h --patterns bearish_engulfing|bearish_engulfing
+R044|patterns|python main.py -s "GBPUSD=X" -p 60d -i 1h --patterns morning_star|morning_star
+R045|patterns|python main.py -s "GBPUSD=X" -p 60d -i 1h --patterns evening_star|evening_star
+R046|patterns|python main.py -s "GBPUSD=X" -p 60d -i 1h --patterns three_white_soldiers|three_white_soldiers
+R047|patterns|python main.py -s "GBPUSD=X" -p 60d -i 1h --patterns three_black_crows|three_black_crows
+
+# --- Candles: timeframe / period ---
+R050|timeframe|python main.py -s "GBPUSD=X" -p 30d -i 1h|30d 1h
+R051|timeframe|python main.py -s "GBPUSD=X" -p 60d -i 1h|60d 1h
+R052|timeframe|python main.py -s "GBPUSD=X" -p 60d -i 15m|60d 15m
+R053|timeframe|python main.py -s "GBPUSD=X" -p 60d -i 4h|60d 4h
+R054|timeframe|python main.py -s "GBPUSD=X" -p 1y -i 1d|1y 1d
+
+# --- Candles: multi-symbol (60d 1h default SL/TP) ---
+R060|symbol|python main.py -s "GBPUSD=X" -p 60d -i 1h|GBPUSD
+R061|symbol|python main.py -s "EURUSD=X" -p 60d -i 1h|EURUSD
+R062|symbol|python main.py -s "USDJPY=X" -p 60d -i 1h|USDJPY
+R063|symbol|python main.py -s "AUDUSD=X" -p 60d -i 1h|AUDUSD
+R064|symbol|python main.py -s "EURJPY=X" -p 60d -i 1h|EURJPY
+
+# --- Candles: inversed ---
+R070|inversed|python main.py -s "GBPUSD=X" -p 60d -i 1h|Normal
+R071|inversed|python main.py -s "GBPUSD=X" -p 60d -i 1h --inversed|Inversed
+R072|inversed|python main.py -s "GBPUSD=X" -p 60d -i 1h --inversed -f|Inversed MTF
+
+# --- AlexG: min-score sweep (RR=3) ---
+R080|alexg_score|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 50 --min-rr 3|Score 50
+R081|alexg_score|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 60 --min-rr 3|Score 60
+R082|alexg_score|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 70 --min-rr 3|Score 70
+R083|alexg_score|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 80 --min-rr 3|Score 80
+R084|alexg_score|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 90 --min-rr 3|Score 90
+R085|alexg_score|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 95 --min-rr 3|Score 95
+
+# --- AlexG: min-RR sweep (score=70) ---
+R090|alexg_rr|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 70 --min-rr 2|RR 2
+R091|alexg_rr|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 70 --min-rr 3|RR 3
+R092|alexg_rr|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 70 --min-rr 4|RR 4
+R093|alexg_rr|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 70 --min-rr 5|RR 5
+R094|alexg_rr|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 70 --min-rr 8|RR 8
+
+# --- AlexG: symbol + costs ---
+R100|alexg_symbol|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h|AlexG GBPUSD
+R101|alexg_symbol|python main.py --strategy alexg -s "EURUSD=X" -p 60d -i 1h|AlexG EURUSD
+R102|alexg_symbol|python main.py --strategy alexg -s "USDJPY=X" -p 60d -i 1h|AlexG USDJPY
+R103|alexg_symbol|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 15m --min-score 70 --min-rr 3|AlexG 15m
+R104|alexg_symbol|python main.py --strategy alexg -s "EURUSD=X" -p 90d -i 4h --min-score 70|AlexG EUR 4h
+
+R110|alexg_costs|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h|AlexG zero costs
+R111|alexg_costs|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --spread-pips 2 --slippage-pips 0.5 --commission 3|AlexG realistic
+R112|alexg_costs|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --inversed|AlexG inversed
+R113|alexg_costs|python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h --min-score 80 --min-rr 4 -l 10|AlexG strict + 10x

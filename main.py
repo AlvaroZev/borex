@@ -6,14 +6,36 @@ from __future__ import annotations
 import argparse
 import sys
 
+from borex.alexg import AlexGMethodStrategy
 from borex.backtest import BacktestConfig, BacktestEngine
-from borex.data import load_csv, load_yfinance
+from borex.data import build_full_mtf_context, load_csv, load_market_data
 from borex.strategy import CandlePatternStrategy
+from borex.strategy.base import Strategy
+
+
+def _parse_leverage(value: str) -> float:
+    leverage = float(value)
+    if not 1 <= leverage <= 1000:
+        raise argparse.ArgumentTypeError("leverage debe estar entre 1 y 1000")
+    return leverage
+
+
+def _parse_sl_mult(value: str) -> float:
+    mult = float(value)
+    if mult <= 0:
+        raise argparse.ArgumentTypeError("sl-mult debe ser > 0")
+    return mult
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Borex — backtesting con patrones de velas japonesas"
+        description="Borex — backtesting con patrones de velas y AlexG Method"
+    )
+    parser.add_argument(
+        "--strategy",
+        choices=["candles", "alexg"],
+        default="candles",
+        help="Estrategia: candles (patrones) o alexg (AlexG Method)",
     )
     parser.add_argument(
         "--symbol", "-s", default="EURUSD=X", help="Símbolo (yfinance)"
@@ -22,7 +44,22 @@ def parse_args() -> argparse.Namespace:
         "--period", "-p", default="30d", help="Periodo histórico (yfinance)"
     )
     parser.add_argument(
-        "--interval", "-i", default="1h", help="Intervalo de velas (yfinance)"
+        "--interval", "-i", default="1h", help="Timeframe de ejecución (mín. 15m con MTF)"
+    )
+    parser.add_argument(
+        "--mtf",
+        "-f",
+        action="store_true",
+        help=(
+            "Multi-timeframe: exige alineación en TODOS los TF superiores "
+            "(30m, 1h, 4h, 1d, 1wk según -i). AlexG lo activa por defecto."
+        ),
+    )
+    parser.add_argument(
+        "--filter-mode",
+        choices=["trend", "off"],
+        default="trend",
+        help="Modo de filtro MTF (solo estrategia candles)",
     )
     parser.add_argument(
         "--csv", help="Ruta a CSV en lugar de yfinance (columnas Date,OHLCV)"
@@ -31,71 +68,212 @@ def parse_args() -> argparse.Namespace:
         "--capital", type=float, default=10_000, help="Capital inicial"
     )
     parser.add_argument(
-        "--stop-loss", type=float, default=0.02, help="Stop loss (fracción, ej. 0.02 = 2%%)"
+        "--leverage",
+        "-l",
+        type=_parse_leverage,
+        default=1.0,
+        help="Apalancamiento de 1 a 1000 (default: 1)",
+    )
+    parser.add_argument(
+        "--maintenance-margin",
+        type=float,
+        default=0.0,
+        help="Stop-out: liquida si equity <= margen × ratio (0 = cuenta a cero)",
+    )
+    parser.add_argument(
+        "--stop-loss", type=float, default=0.02, help="Stop loss %% (solo candles; alexg usa estructura)"
     )
     parser.add_argument(
         "--take-profit",
         type=float,
         default=0.04,
-        help="Take profit (fracción, ej. 0.04 = 4%%)",
+        help="Take profit %% (solo candles; alexg usa estructura)",
+    )
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=70.0,
+        help="AlexG: score mínimo de confluencia (70=valid, 100=A+)",
+    )
+    parser.add_argument(
+        "--min-rr",
+        type=float,
+        default=3.0,
+        help="AlexG: risk/reward mínimo (ej. 3 = TP/SL 3:1)",
+    )
+    parser.add_argument(
+        "--max-tp-pct",
+        type=float,
+        default=None,
+        help="AlexG: TP máximo como %% del entry (ej. 0.01 = 1%%). Limita reward a RR×SL.",
+    )
+    parser.add_argument(
+        "--sl-mult",
+        type=_parse_sl_mult,
+        default=1.0,
+        help="AlexG: multiplicador del SL estructural (>1 = más ancho, ej. 1.25)",
     )
     parser.add_argument(
         "--patterns",
         nargs="*",
-        help="Patrones a usar (default: todos). Ej: hammer bullish_engulfing",
+        help="Patrones a usar (solo candles). Ej: hammer bullish_engulfing",
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Mostrar cada trade"
     )
+    parser.add_argument(
+        "--inversed",
+        action="store_true",
+        help="Invertir trades: compras pasan a ventas y viceversa",
+    )
+    parser.add_argument(
+        "--spread-pips",
+        type=float,
+        default=0.0,
+        help="Spread en pips (round-trip: mitad en entry, mitad en exit)",
+    )
+    parser.add_argument(
+        "--slippage-pips",
+        type=float,
+        default=0.0,
+        help="Slippage adverso en pips por fill (entry y exit)",
+    )
+    parser.add_argument(
+        "--commission",
+        type=float,
+        default=0.0,
+        help="Comisión fija USD por trade cerrado",
+    )
+    parser.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="Solo datos locales (data/cache). No llama a Yahoo.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Forzar descarga Yahoo (ignorar cache)",
+    )
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def _cache_mode(args: argparse.Namespace) -> str:
+    if args.use_cache:
+        return "only"
+    if args.no_cache:
+        return "off"
+    return "auto"
 
-    try:
-        if args.csv:
-            candles = load_csv(args.csv)
-            symbol = args.csv
-            timeframe = "csv"
-        else:
-            candles = load_yfinance(args.symbol, args.period, args.interval)
-            symbol = args.symbol
-            timeframe = args.interval
-    except Exception as exc:
-        print(f"Error cargando datos: {exc}", file=sys.stderr)
-        return 1
 
-    if len(candles) < 20:
-        print("Datos insuficientes para backtest (mínimo ~20 velas).", file=sys.stderr)
-        return 1
-
-    strategy = CandlePatternStrategy()
+def _build_strategy(args: argparse.Namespace) -> Strategy:
+    if args.strategy == "alexg":
+        return AlexGMethodStrategy(
+            min_score=args.min_score,
+            min_rr=args.min_rr,
+            max_tp_pct=args.max_tp_pct,
+            sl_mult=args.sl_mult,
+        )
+    strategy = CandlePatternStrategy(filter_mode=args.filter_mode)
     if args.patterns:
         strategy.enabled_patterns = set(args.patterns)
+    return strategy
 
-    config = BacktestConfig(
+
+def _build_config(args: argparse.Namespace) -> BacktestConfig:
+    base = dict(
         initial_capital=args.capital,
+        leverage=args.leverage,
+        maintenance_margin_ratio=args.maintenance_margin,
+        inversed=args.inversed,
+        spread_pips=args.spread_pips,
+        slippage_pips=args.slippage_pips,
+        commission_per_trade=args.commission,
+    )
+    if args.strategy == "alexg":
+        return BacktestConfig(
+            **base,
+            stop_loss_pct=None,
+            take_profit_pct=None,
+        )
+    return BacktestConfig(
+        **base,
         stop_loss_pct=args.stop_loss,
         take_profit_pct=args.take_profit,
     )
 
+
+def main() -> int:
+    args = parse_args()
+    use_mtf = args.mtf or args.strategy == "alexg"
+
+    mtf = None
+    cache_mode = _cache_mode(args)
+    try:
+        if args.csv:
+            if use_mtf:
+                print(
+                    "MTF con CSV no soportado aún. Usa yfinance o quita --mtf.",
+                    file=sys.stderr,
+                )
+                return 1
+            candles = load_csv(args.csv)
+            symbol = args.csv
+            timeframe = "csv"
+        else:
+            candles = load_market_data(
+                args.symbol, args.period, args.interval, cache_mode=cache_mode
+            )
+            symbol = args.symbol
+            timeframe = args.interval
+
+            if use_mtf:
+                mtf = build_full_mtf_context(
+                    candles,
+                    args.interval,
+                    args.symbol,
+                    args.period,
+                    cache_mode=cache_mode,
+                )
+    except Exception as exc:
+        print(f"Error cargando datos: {exc}", file=sys.stderr)
+        return 1
+
+    min_bars = 80 if args.strategy == "alexg" else 20
+    if len(candles) < min_bars:
+        print(
+            f"Datos insuficientes (mínimo ~{min_bars} velas).",
+            file=sys.stderr,
+        )
+        return 1
+
+    strategy = _build_strategy(args)
+    config = _build_config(args)
+
     engine = BacktestEngine(strategy, config)
-    result = engine.run(candles, symbol=symbol, timeframe=timeframe)
+    result = engine.run(candles, symbol=symbol, timeframe=timeframe, mtf=mtf)
 
     print(result.summary())
     print(f"Velas analizadas: {len(candles)}")
+    if mtf:
+        print(f"Timeframes filtro (todos deben alinear): {', '.join(mtf.filter_intervals)}")
+        for interval in mtf.filter_intervals:
+            print(f"  {interval}: {len(mtf.filter_candles[interval])} velas")
     print()
 
     if args.verbose and result.trades:
         print("Trades:")
-        print("-" * 80)
+        print("-" * 90)
         for i, t in enumerate(result.trades, 1):
             sign = "+" if t.pnl >= 0 else ""
+            account_pct = t.pnl_pct * args.leverage
+            score_txt = f" score={t.score:.0f}" if t.score else ""
+            sl_tp = ""
+            if t.stop_loss is not None and t.take_profit is not None:
+                sl_tp = f" SL={t.stop_loss:.5f} TP={t.take_profit:.5f}"
             print(
-                f"  {i:3d}. {t.side.value:5s} | {t.pattern:22s} | "
-                f"entry {t.entry_price:.5f} -> exit {t.exit_price:.5f} | "
-                f"PnL {sign}{t.pnl:.2f} ({sign}{t.pnl_pct:.2%}) [{t.exit_reason}]"
+                f"  {i:3d}. {t.side.value:5s} | {t.pattern:30s} | "
+                f"entry {t.entry_price:.5f} -> exit {t.exit_price:.5f}{sl_tp} | "
+                f"PnL {sign}{t.pnl:.2f} ({sign}{account_pct:.2%}){score_txt} [{t.exit_reason}]"
             )
 
     return 0
