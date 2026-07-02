@@ -8,6 +8,7 @@ import sys
 
 from borex.alexg import AlexGMethodStrategy
 from borex.backtest import BacktestConfig, BacktestEngine
+from borex.institutional import InstitutionalFlowStrategy
 from borex.data import build_full_mtf_context, load_csv, load_market_data
 from borex.strategy import CandlePatternStrategy
 from borex.strategy.base import Strategy
@@ -27,15 +28,22 @@ def _parse_sl_mult(value: str) -> float:
     return mult
 
 
+def _parse_risk_pct(value: str) -> float:
+    risk = float(value)
+    if not 0 < risk <= 1:
+        raise argparse.ArgumentTypeError("risk-per-trade debe estar entre 0 y 1 (ej. 0.01 = 1%)")
+    return risk
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Borex — backtesting con patrones de velas y AlexG Method"
+        description="Borex — backtesting con patrones, AlexG Method e Institutional Flow"
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg"],
+        choices=["candles", "alexg", "institutional"],
         default="candles",
-        help="Estrategia: candles (patrones) o alexg (AlexG Method)",
+        help="Estrategia: candles, alexg (AlexG Method) o institutional (Institutional Flow)",
     )
     parser.add_argument(
         "--symbol", "-s", default="EURUSD=X", help="Símbolo (yfinance)"
@@ -111,7 +119,13 @@ def parse_args() -> argparse.Namespace:
         "--sl-mult",
         type=_parse_sl_mult,
         default=1.0,
-        help="AlexG: multiplicador del SL estructural (>1 = más ancho, ej. 1.25)",
+        help="AlexG/institutional: multiplicador del SL estructural (>1 = más ancho, ej. 1.25)",
+    )
+    parser.add_argument(
+        "--risk-per-trade",
+        type=_parse_risk_pct,
+        default=None,
+        help="Riesgo fijo por trade si toca SL (ej. 0.01 = 1%% del equity). AlexG: 1-2%%",
     )
     parser.add_argument(
         "--patterns",
@@ -173,6 +187,12 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             max_tp_pct=args.max_tp_pct,
             sl_mult=args.sl_mult,
         )
+    if args.strategy == "institutional":
+        return InstitutionalFlowStrategy(
+            min_score=args.min_score,
+            min_rr=args.min_rr,
+            atr_sl_mult=args.sl_mult,
+        )
     strategy = CandlePatternStrategy(filter_mode=args.filter_mode)
     if args.patterns:
         strategy.enabled_patterns = set(args.patterns)
@@ -188,8 +208,9 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         spread_pips=args.spread_pips,
         slippage_pips=args.slippage_pips,
         commission_per_trade=args.commission,
+        risk_per_trade_pct=args.risk_per_trade,
     )
-    if args.strategy == "alexg":
+    if args.strategy in ("alexg", "institutional"):
         return BacktestConfig(
             **base,
             stop_loss_pct=None,
@@ -204,7 +225,7 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
 
 def main() -> int:
     args = parse_args()
-    use_mtf = args.mtf or args.strategy == "alexg"
+    use_mtf = args.mtf or args.strategy in ("alexg", "institutional")
 
     mtf = None
     cache_mode = _cache_mode(args)
@@ -238,7 +259,7 @@ def main() -> int:
         print(f"Error cargando datos: {exc}", file=sys.stderr)
         return 1
 
-    min_bars = 80 if args.strategy == "alexg" else 20
+    min_bars = 80 if args.strategy == "alexg" else 60 if args.strategy == "institutional" else 20
     if len(candles) < min_bars:
         print(
             f"Datos insuficientes (mínimo ~{min_bars} velas).",

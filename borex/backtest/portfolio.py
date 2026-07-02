@@ -112,6 +112,34 @@ class Portfolio:
             and self.cash > 0
         )
 
+    def compute_margin(
+        self,
+        entry_price: float,
+        stop_loss: float | None = None,
+        risk_per_trade_pct: float | None = None,
+    ) -> float:
+        """
+        Tamaño de posición. Con risk_per_trade_pct, pierde ese %% del equity si toca SL
+        (gestión AlexG: riesgo fijo por trade, reward >= min_rr × riesgo).
+        """
+        entry_equity = self.equity
+        cap = min(entry_equity * self.position_size_pct, self.cash)
+
+        if (
+            risk_per_trade_pct is None
+            or stop_loss is None
+            or entry_price <= 0
+            or self.leverage <= 0
+        ):
+            return cap
+
+        sl_dist_pct = abs(entry_price - stop_loss) / entry_price
+        if sl_dist_pct <= 0:
+            return cap
+
+        risk_margin = entry_equity * risk_per_trade_pct / (self.leverage * sl_dist_pct)
+        return min(risk_margin, cap)
+
     def open_position(
         self,
         action: SignalAction,
@@ -122,12 +150,13 @@ class Portfolio:
         stop_loss: float | None = None,
         take_profit: float | None = None,
         score: float = 0.0,
+        risk_per_trade_pct: float | None = None,
     ) -> bool:
         if not self.can_open():
             return False
 
         entry_equity = self.equity
-        margin = entry_equity * self.position_size_pct
+        margin = self.compute_margin(price, stop_loss, risk_per_trade_pct)
         if margin <= 0:
             return False
 

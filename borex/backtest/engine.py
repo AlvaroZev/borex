@@ -21,6 +21,7 @@ class BacktestConfig:
     inversed: bool = False
     stop_loss_pct: float | None = 0.02  # 2% stop loss
     take_profit_pct: float | None = 0.04  # 4% take profit
+    risk_per_trade_pct: float | None = None  # riesgo fijo si SL toca (ej. 0.01 = 1%)
     close_on_opposite_signal: bool = True
     spread_pips: float = 0.0
     slippage_pips: float = 0.0
@@ -45,6 +46,10 @@ class BacktestResult:
     filter_intervals: list[str] | None = None
     total_commission: float = 0.0
     equity_curve: list[float] = field(default_factory=list)
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
+    profit_factor: float = 0.0
+    avg_planned_rr: float = 0.0
 
     def summary(self) -> str:
         tf = self.timeframe
@@ -63,6 +68,13 @@ class BacktestResult:
             f"Trades: {self.total_trades} (W: {self.winning_trades} / L: {self.losing_trades})",
             f"Win rate: {self.win_rate:.2%}",
         ]
+        if self.total_trades > 0:
+            lines.append(
+                f"Avg win: ${self.avg_win:,.2f} | Avg loss: ${self.avg_loss:,.2f} | "
+                f"Profit factor: {self.profit_factor:.2f}"
+            )
+            if self.avg_planned_rr > 0:
+                lines.append(f"Planned RR (avg): {self.avg_planned_rr:.2f}:1")
         if (
             self.config.spread_pips
             or self.config.slippage_pips
@@ -266,6 +278,7 @@ class BacktestEngine:
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 score=signal.score,
+                risk_per_trade_pct=self.config.risk_per_trade_pct,
             )
 
     def _mark_equity(self, portfolio: Portfolio, candle: Candle) -> float:
@@ -348,6 +361,22 @@ class BacktestEngine:
         total_return = (final - initial) / initial if initial else 0.0
         win_rate = len(winners) / len(trades) if trades else 0.0
 
+        avg_win = sum(t.pnl for t in winners) / len(winners) if winners else 0.0
+        avg_loss = sum(t.pnl for t in losers) / len(losers) if losers else 0.0
+        gross_win = sum(t.pnl for t in winners)
+        gross_loss = abs(sum(t.pnl for t in losers))
+        profit_factor = gross_win / gross_loss if gross_loss > 0 else 0.0
+
+        planned_rrs: list[float] = []
+        for t in trades:
+            if t.stop_loss is None or t.take_profit is None or t.entry_price <= 0:
+                continue
+            risk = abs(t.entry_price - t.stop_loss)
+            reward = abs(t.take_profit - t.entry_price)
+            if risk > 0:
+                planned_rrs.append(reward / risk)
+        avg_planned_rr = sum(planned_rrs) / len(planned_rrs) if planned_rrs else 0.0
+
         return BacktestResult(
             strategy_name=self.strategy.name,
             symbol=symbol,
@@ -364,4 +393,8 @@ class BacktestEngine:
             max_drawdown_pct=max_dd,
             total_commission=self._total_commission,
             equity_curve=equity_curve,
+            avg_win=avg_win,
+            avg_loss=avg_loss,
+            profit_factor=profit_factor,
+            avg_planned_rr=avg_planned_rr,
         )

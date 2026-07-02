@@ -25,6 +25,26 @@ def next_swing_target(
     return lows[0].price if lows else None
 
 
+def last_swing_target(
+    swings: list[SwingPoint],
+    index: int,
+    action: SignalAction,
+    entry: float,
+) -> float | None:
+    """TP en el último swing high (long) o swing low (short) antes de la entrada."""
+    if action == SignalAction.BUY:
+        highs = [s for s in swings if s.kind == "high" and s.index < index]
+        if not highs:
+            return None
+        level = highs[-1].price
+        return level if level > entry else None
+    lows = [s for s in swings if s.kind == "low" and s.index < index]
+    if not lows:
+        return None
+    level = lows[-1].price
+    return level if level < entry else None
+
+
 def structure_stop_loss(
     candles: list[Candle],
     index: int,
@@ -83,7 +103,7 @@ def structure_take_profit(
 
     swing_target = None
     if swings:
-        swing_target = next_swing_target(swings, index, action)
+        swing_target = last_swing_target(swings, index, action, entry)
 
     min_target = (
         entry + reward
