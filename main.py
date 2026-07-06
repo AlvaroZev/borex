@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from borex.alexg import AlexGMethodStrategy
+from borex.alexg import AlexG2Strategy, AlexGMethodStrategy
 from borex.backtest import BacktestConfig, BacktestEngine
 from borex.institutional import InstitutionalFlowStrategy
 from borex.data import build_full_mtf_context, load_csv, load_market_data
@@ -41,9 +41,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "institutional"],
+        choices=["candles", "alexg", "alexg2", "institutional"],
         default="candles",
-        help="Estrategia: candles, alexg (AlexG Method) o institutional (Institutional Flow)",
+        help="Estrategia: candles, alexg, alexg2 o institutional",
     )
     parser.add_argument(
         "--symbol", "-s", default="EURUSD=X", help="Símbolo (yfinance)"
@@ -187,6 +187,8 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             max_tp_pct=args.max_tp_pct,
             sl_mult=args.sl_mult,
         )
+    if args.strategy == "alexg2":
+        return AlexG2Strategy(min_rr=args.min_rr)
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
             min_score=args.min_score,
@@ -210,7 +212,7 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         commission_per_trade=args.commission,
         risk_per_trade_pct=args.risk_per_trade,
     )
-    if args.strategy in ("alexg", "institutional"):
+    if args.strategy in ("alexg", "alexg2", "institutional"):
         return BacktestConfig(
             **base,
             stop_loss_pct=None,
@@ -225,7 +227,7 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
 
 def main() -> int:
     args = parse_args()
-    use_mtf = args.mtf or args.strategy in ("alexg", "institutional")
+    use_mtf = args.mtf or args.strategy in ("alexg", "alexg2", "institutional")
 
     mtf = None
     cache_mode = _cache_mode(args)
@@ -259,7 +261,13 @@ def main() -> int:
         print(f"Error cargando datos: {exc}", file=sys.stderr)
         return 1
 
-    min_bars = 80 if args.strategy == "alexg" else 60 if args.strategy == "institutional" else 20
+    min_bars = (
+        80
+        if args.strategy in ("alexg", "alexg2")
+        else 60
+        if args.strategy == "institutional"
+        else 20
+    )
     if len(candles) < min_bars:
         print(
             f"Datos insuficientes (mínimo ~{min_bars} velas).",
