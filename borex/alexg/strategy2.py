@@ -7,6 +7,7 @@ from borex.alexg.aoi2 import (
     build_bidirectional_aoi,
     next_aoi_target,
     recent_aoi_at_bar,
+    scale_tp_toward_target,
     stops_from_aoi_tp,
 )
 from borex.alexg.confirmation import (
@@ -167,6 +168,7 @@ class AlexG2Strategy(Strategy):
 
     name: str = "alexg2"
     min_rr: float = 2.0
+    tp_fraction: float = 1.0  # 1.0 = full next AOI; 0.7 = 70% of the way
     swing_lookback: int = 5
     aoi_tolerance_pct: float = 0.002
     min_aoi_touches: int = 2
@@ -221,6 +223,9 @@ class AlexG2Strategy(Strategy):
         tp_level = next_aoi_target(entry, zones, action)
         if tp_level is None:
             return None
+        tp_level = scale_tp_toward_target(
+            entry, tp_level, action, self.tp_fraction
+        )
 
         structural_sl = structure_stop_loss(window, index, action, aoi.level)
         stops = stops_from_aoi_tp(

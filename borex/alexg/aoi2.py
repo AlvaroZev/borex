@@ -125,6 +125,22 @@ def next_aoi_target(
     return max(z.level for z in below)
 
 
+def scale_tp_toward_target(
+    entry: float,
+    full_target: float,
+    action: SignalAction,
+    fraction: float = 1.0,
+) -> float:
+    """TP at `fraction` of the distance from entry to the full AOI target."""
+    if fraction >= 1.0:
+        return full_target
+    if fraction <= 0:
+        return entry
+    if action == SignalAction.BUY:
+        return entry + (full_target - entry) * fraction
+    return entry - (entry - full_target) * fraction
+
+
 def stops_from_aoi_tp(
     entry: float,
     take_profit: float,
@@ -133,8 +149,8 @@ def stops_from_aoi_tp(
     min_rr: float,
 ) -> tuple[float, float] | None:
     """
-    TP is fixed at the next AOI. SL is derived for RR >= min_rr,
-    but cannot be tighter than the structural invalidation level.
+    TP is fixed (full or partial AOI). SL from reward/min_rr, floored/ceilinged
+    by structural invalidation. Never skips a signal — same entries as full TP.
     """
     reward = abs(take_profit - entry)
     if reward <= 0:
@@ -142,17 +158,13 @@ def stops_from_aoi_tp(
 
     if action == SignalAction.BUY:
         calc_sl = entry - reward / min_rr
-        if calc_sl > structural_sl:
-            risk = entry - structural_sl
-            if risk <= 0 or reward / risk < min_rr:
-                return None
-            return structural_sl, take_profit
-        return calc_sl, take_profit
+        sl = max(calc_sl, structural_sl)
+        if sl >= entry:
+            return None
+        return sl, take_profit
 
     calc_sl = entry + reward / min_rr
-    if calc_sl < structural_sl:
-        risk = structural_sl - entry
-        if risk <= 0 or reward / risk < min_rr:
-            return None
-        return structural_sl, take_profit
-    return calc_sl, take_profit
+    sl = min(calc_sl, structural_sl)
+    if sl <= entry:
+        return None
+    return sl, take_profit

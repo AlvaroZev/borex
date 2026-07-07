@@ -4,12 +4,28 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from borex.backtest.costs import TradeCosts, apply_entry_fill, apply_exit_fill, infer_pip_size
+from borex.backtest.margin_stops import (
+    margin_stop_out_prices,
+    rr_from_winrate,
+    tighten_sl_to_margin_stop,
+    tp_from_sl_rr,
+)
 from borex.backtest.portfolio import Portfolio, PositionSide, Trade
 from borex.models.candle import Candle, Signal, SignalAction
 from borex.strategy.base import Strategy
 
 if TYPE_CHECKING:
     from borex.data.mtf import MultiTimeframeContext
+
+
+def mirror_sl_tp_for_inverse(
+    entry: float, stop_loss: float, take_profit: float
+) -> tuple[float, float]:
+    """
+    Mirror SL/TP around entry when flipping trade direction.
+    Preserves the same risk/reward distances (not a naive swap).
+    """
+    return 2.0 * entry - stop_loss, 2.0 * entry - take_profit
 
 
 @dataclass
@@ -24,6 +40,8 @@ class BacktestConfig:
     risk_per_trade_pct: float | None = None  # riesgo fijo si SL toca (ej. 0.01 = 1%)
     size_mode: str = "fixed_risk"  # fixed_risk | margin
     close_on_opposite_signal: bool = False
+    true_sl: bool = False  # SL at margin wipe; TP at true_sl_rr
+    true_sl_rr: float = 2.0
     spread_pips: float = 0.0
     slippage_pips: float = 0.0
     commission_per_trade: float = 0.0
@@ -63,6 +81,8 @@ class BacktestResult:
             f"Capital inicial: ${self.config.initial_capital:,.2f}",
             f"Apalancamiento: {self.config.leverage:g}x",
             f"Size mode: {self.config.size_mode}",
+            f"Margen por trade: {self.config.position_size_pct:.2%} del cash libre",
+            f"True SL: {'sí' if self.config.true_sl else 'no'}",
             f"Invertido: {'sí' if self.config.inversed else 'no'}",
             f"Capital final: ${self.final_equity:,.2f}",
             f"Retorno total: {self.total_return_pct:.2%}",
@@ -266,12 +286,34 @@ class BacktestEngine:
             exec_price = self._fill_entry(mid_price, side)
             stop_loss = signal.stop_loss
             take_profit = signal.take_profit
+            rr = rr_from_winrate(portfolio.win_rate, self.config.true_sl_rr)
+
+            if self.config.true_sl and self.config.size_mode == "margin":
+                stop_loss, take_profit = margin_stop_out_prices(
+                    exec_price,
+                    side,
+                    self.config.leverage,
+                    rr,
+                )
+            elif self.config.size_mode == "margin":
+                if stop_loss is not None:
+                    stop_loss = tighten_sl_to_margin_stop(
+                        exec_price, stop_loss, side, self.config.leverage
+                    )
+                if stop_loss is not None:
+                    take_profit = tp_from_sl_rr(exec_price, stop_loss, side, rr)
+            elif stop_loss is not None:
+                take_profit = tp_from_sl_rr(exec_price, stop_loss, side, rr)
+
             if (
                 self.config.inversed
                 and stop_loss is not None
                 and take_profit is not None
             ):
-                stop_loss, take_profit = take_profit, stop_loss
+                stop_loss, take_profit = mirror_sl_tp_for_inverse(
+                    exec_price, stop_loss, take_profit
+                )
+
             portfolio.open_position(
                 action,
                 exec_index,
@@ -280,7 +322,7 @@ class BacktestEngine:
                 signal.pattern,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
-                score=signal.score,
+                score=rr,
                 risk_per_trade_pct=self.config.risk_per_trade_pct,
                 size_mode=self.config.size_mode,
             )
@@ -297,13 +339,21 @@ class BacktestEngine:
         if trade is None:
             return False
 
-        liq_price = portfolio.liquidation_price()
-        adverse = portfolio.adverse_price(candle.low, candle.high)
-        if liq_price is not None and portfolio.is_margin_call_at(adverse):
-            self._close_with_costs(
-                portfolio, index, liq_price, candle.timestamp, "liquidation"
-            )
-            return True
+        if self.config.size_mode == "margin":
+            ms_price = portfolio.margin_stop_out_price()
+            if ms_price is not None and self._hit_margin_stop(trade, candle, ms_price):
+                self._close_with_costs(
+                    portfolio, index, ms_price, candle.timestamp, "margin_stop"
+                )
+                return True
+        else:
+            liq_price = portfolio.liquidation_price()
+            adverse = portfolio.adverse_price(candle.low, candle.high)
+            if liq_price is not None and portfolio.is_margin_call_at(adverse):
+                self._close_with_costs(
+                    portfolio, index, liq_price, candle.timestamp, "liquidation"
+                )
+                return True
 
         sl = self.config.stop_loss_pct
         tp = self.config.take_profit_pct
@@ -346,6 +396,13 @@ class BacktestEngine:
                 return True
 
         return False
+
+    def _hit_margin_stop(
+        self, trade: Trade, candle: Candle, ms_price: float
+    ) -> bool:
+        if trade.side == PositionSide.LONG:
+            return candle.low <= ms_price
+        return candle.high >= ms_price
 
     def _build_result(
         self,

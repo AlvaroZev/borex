@@ -80,14 +80,31 @@ def _aoi_levels_at_signal(
     ]
 
 
-def trade_summary(trade: Trade, leverage: float, symbol: str = "") -> dict[str, Any]:
+def _analysis_side(meta: dict[str, str]) -> str | None:
+    trend = meta.get("trend", "")
+    if trend == "bullish":
+        return "long"
+    if trend == "bearish":
+        return "short"
+    return None
+
+
+def trade_summary(
+    trade: Trade, leverage: float, symbol: str = "", inversed: bool = False
+) -> dict[str, Any]:
     signal_index = max(0, trade.entry_index - 1)
     meta = _parse_alexg2_pattern(trade.pattern)
     signal_label = _signal_label(meta)
     precision, _ = _price_precision(symbol)
+    analysis_side = _analysis_side(meta)
     risk = abs(trade.entry_price - trade.stop_loss) if trade.stop_loss else 0
     reward = abs(trade.take_profit - trade.entry_price) if trade.take_profit else 0
     rr = reward / risk if risk > 0 else 0
+
+    margin_return = trade.pnl / trade.margin if trade.margin else 0.0
+    notional = trade.margin * leverage
+    cash_at_entry = trade.entry_cash or trade.entry_equity
+    account_pct = trade.pnl / cash_at_entry if cash_at_entry else 0.0
 
     return {
         "id": None,  # filled by caller
@@ -95,6 +112,9 @@ def trade_summary(trade: Trade, leverage: float, symbol: str = "") -> dict[str, 
         "pattern": trade.pattern,
         "meta": meta,
         "signal_label": signal_label,
+        "analysis_side": analysis_side,
+        "executed_side": trade.side.value,
+        "inversed": inversed,
         "signal_index": signal_index,
         "entry_index": trade.entry_index,
         "exit_index": trade.exit_index,
@@ -105,10 +125,20 @@ def trade_summary(trade: Trade, leverage: float, symbol: str = "") -> dict[str, 
         "stop_loss": trade.stop_loss,
         "take_profit": trade.take_profit,
         "planned_rr": round(rr, 2),
+        "entry_equity": round(trade.entry_equity, 2),
+        "entry_cash": round(cash_at_entry, 2),
+        "margin": round(trade.margin, 2),
+        "notional": round(notional, 2),
+        "leverage": leverage,
+        "account_exposure": round(
+            notional / cash_at_entry if cash_at_entry else 0.0, 2
+        ),
+        "price_move_pct": round(trade.pnl_pct, 6),
         "pnl": round(trade.pnl, 2),
-        "pnl_pct": round(trade.pnl_pct * leverage, 4),
-        "account_pct": round(
-            trade.pnl / trade.entry_equity if trade.entry_equity else 0.0, 4
+        "margin_return_pct": round(margin_return, 4),
+        "account_pct": round(account_pct, 4),
+        "risk_pct": round(
+            trade.margin / cash_at_entry if cash_at_entry else 0.0, 4
         ),
         "exit_reason": trade.exit_reason,
         "score": trade.score,
@@ -121,6 +151,7 @@ def build_trade_chart(
     trade_id: int,
     leverage: float,
     symbol: str = "",
+    inversed: bool = False,
     bars_before: int = 55,
     bars_after: int = 20,
 ) -> dict[str, Any]:
@@ -186,7 +217,7 @@ def build_trade_chart(
 
     aoi_levels = _aoi_levels_at_signal(candles, signal_index)
 
-    summary = trade_summary(trade, leverage, symbol)
+    summary = trade_summary(trade, leverage, symbol, inversed)
     summary["id"] = trade_id
     summary["chart_start_index"] = start
     summary["chart_end_index"] = end - 1
@@ -249,11 +280,14 @@ class ViewerSession:
     total_return_pct: float
     win_rate: float
     total_trades: int
+    inversed: bool = False
+    tp_fraction: float = 1.0
+    true_sl: bool = False
 
     def trade_summaries(self) -> list[dict[str, Any]]:
         out = []
         for i, t in enumerate(self.trades):
-            s = trade_summary(t, self.leverage, self.symbol)
+            s = trade_summary(t, self.leverage, self.symbol, self.inversed)
             s["id"] = i
             out.append(s)
         return out
@@ -267,6 +301,7 @@ class ViewerSession:
             trade_id,
             self.leverage,
             self.symbol,
+            self.inversed,
         )
 
     def to_json(self) -> str:
@@ -279,6 +314,9 @@ class ViewerSession:
             "total_return_pct": self.total_return_pct,
             "win_rate": self.win_rate,
             "total_trades": self.total_trades,
+            "inversed": self.inversed,
+            "tp_fraction": self.tp_fraction,
+            "true_sl": self.true_sl,
             "trades": self.trade_summaries(),
         }
         return json.dumps(payload)

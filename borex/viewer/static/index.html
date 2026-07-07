@@ -230,6 +230,9 @@
         <span>Leverage <strong>${session.leverage}x</strong></span>
         <span>Trades <strong>${session.total_trades}</strong></span>
         <span>Win rate <strong>${(session.win_rate * 100).toFixed(1)}%</strong></span>
+        ${session.inversed ? '<span class="badge" style="background:rgba(251,191,36,0.2);color:var(--yellow)">Inversed entries</span>' : ''}
+        ${session.tp_fraction < 1 ? `<span class="badge" style="background:rgba(139,156,179,0.2);color:var(--muted)">TP ${(session.tp_fraction * 100).toFixed(0)}% to AOI</span>` : ''}
+        ${session.true_sl ? '<span class="badge" style="background:rgba(59,130,246,0.2);color:#93c5fd">True SL</span>' : ''}
         <span class="badge ${retClass}">Return ${fmtPct(session.total_return_pct)}</span>
       `;
     }
@@ -254,7 +257,7 @@
               <span class="pnl" style="color:${win ? 'var(--green)' : 'var(--red)'}">${win ? '+' : ''}$${t.pnl.toFixed(2)}</span>
             </div>
             <div class="detail"><strong style="color:var(--yellow)">${sig}</strong> · ${setup || t.pattern}</div>
-            <div class="detail">${t.exit_reason} · RR ${t.planned_rr}:1 · acct ${fmtPct(t.account_pct ?? 0)} · margin ${fmtPct(t.pnl_pct)}</div>
+            <div class="detail">${t.exit_reason} · RR ${t.planned_rr}:1 · ${(t.leverage ?? session.leverage ?? 0).toFixed(0)}x · risk ${fmtPct(t.risk_pct ?? 0)} · acct ${fmtPct(t.account_pct ?? 0)} · margin ${fmtPct(t.margin_return_pct ?? 0)}</div>
           </li>
         `;
       }).join("");
@@ -289,9 +292,15 @@
       const sc = t.signal_candle || {};
       const aoiTxt = meta.aoi_kind ? `${meta.aoi_kind} AOI` : "AOI";
       const setupTxt = meta.setup ? `${meta.setup} setup` : "setup";
+      const analysisSide = t.analysis_side ? t.analysis_side.toUpperCase() : "—";
+      const executedSide = (t.executed_side || t.side || "").toUpperCase();
+      const inverseNote = session.inversed
+        ? `<div class="signal-callout" style="border-color:rgba(59,130,246,0.35);background:rgba(59,130,246,0.08)">Analysis says <strong>${analysisSide}</strong> → entered <strong>${executedSide}</strong> (inversed)</div>`
+        : "";
 
       document.getElementById("trade-header").innerHTML = `
-        <h2>Trade #${t.id + 1} — ${t.side.toUpperCase()} <span class="badge ${win ? 'win' : 'loss'}">${t.exit_reason.replace(/_/g, " ")}</span></h2>
+        <h2>Trade #${t.id + 1} — ${executedSide} <span class="badge ${win ? 'win' : 'loss'}">${t.exit_reason.replace(/_/g, " ")}</span></h2>
+        ${inverseNote}
         <div class="signal-callout">
           Entry triggered by <strong>${sig}</strong> (${setupTxt} at ${aoiTxt}, ${meta.trend || "—"} trend)
           <span class="ohlc">Signal candle O ${fmtPrice(sc.open, prec)} · H ${fmtPrice(sc.high, prec)} · L ${fmtPrice(sc.low, prec)} · C ${fmtPrice(sc.close, prec)}</span>
@@ -308,7 +317,9 @@
           <div>Stop loss<strong>${fmtPrice(t.stop_loss, prec)}</strong></div>
           <div>Take profit<strong>${fmtPrice(t.take_profit, prec)}</strong></div>
           <div>Planned RR<strong>${t.planned_rr}:1</strong></div>
-          <div>PnL<strong style="color:${win ? 'var(--green)' : 'var(--red)'}">$${t.pnl.toFixed(2)} (acct ${fmtPct(t.account_pct ?? 0)}, margin ${fmtPct(t.pnl_pct)})</strong></div>
+          <div>Margin<strong>$${(t.margin ?? 0).toFixed(2)}</strong></div>
+          <div>Notional<strong>$${(t.notional ?? 0).toLocaleString(undefined,{maximumFractionDigits:0})} (${(t.leverage ?? session.leverage ?? 0).toFixed(0)}x)</strong></div>
+          <div>PnL<strong style="color:${win ? 'var(--green)' : 'var(--red)'}">$${t.pnl.toFixed(2)} (acct ${fmtPct(t.account_pct ?? 0)}, margin ${fmtPct(t.margin_return_pct ?? 0)})</strong></div>
           <div>Signal bar<strong>${t.signal_time ? new Date(t.signal_time).toLocaleString() : "—"}</strong></div>
           <div>Entry bar<strong>${new Date(t.entry_time).toLocaleString()}</strong></div>
           <div>Exit bar<strong>${t.exit_time ? new Date(t.exit_time).toLocaleString() : "—"}</strong></div>

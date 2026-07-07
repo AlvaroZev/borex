@@ -110,6 +110,12 @@ def parse_args() -> argparse.Namespace:
         help="AlexG: risk/reward mínimo (ej. 3 = TP/SL 3:1)",
     )
     parser.add_argument(
+        "--tp-fraction",
+        type=float,
+        default=1.0,
+        help="AlexG2: TP a fracción del camino al siguiente AOI (1.0=completo, 0.7=70%%)",
+    )
+    parser.add_argument(
         "--max-tp-pct",
         type=float,
         default=None,
@@ -133,14 +139,14 @@ def parse_args() -> argparse.Namespace:
         default="fixed_risk",
         help=(
             "fixed_risk: riesgo fijo en $ al SL (leverage no cambia PnL). "
-            "margin: margen = equity × position-size; leverage escala PnL."
+            "margin: margen = cash libre × position-size; nocional = margen × leverage."
         ),
     )
     parser.add_argument(
         "--position-size",
         type=float,
         default=1.0,
-        help="Fracción del equity usada como margen en size-mode=margin (default: 1)",
+        help="Fracción del cash libre (no invertido) usada como margen (default: 0.01 = 1%%)",
     )
     parser.add_argument(
         "--patterns",
@@ -159,6 +165,15 @@ def parse_args() -> argparse.Namespace:
         "--close-on-opposite",
         action="store_true",
         help="Cerrar posición abierta si llega una señal en dirección opuesta (default: off)",
+    )
+    parser.add_argument(
+        "--true-sl",
+        action="store_true",
+        help=(
+            "Margin mode: SL al wipe del margen (pierde solo el margen apostado); "
+            "TP a min-rr desde ese SL. Sin esto, el margen stop sigue activo pero "
+            "el SL estructural de la estrategia puede ser más lejano."
+        ),
     )
     parser.add_argument(
         "--spread-pips",
@@ -208,7 +223,7 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             sl_mult=args.sl_mult,
         )
     if args.strategy == "alexg2":
-        return AlexG2Strategy(min_rr=args.min_rr)
+        return AlexG2Strategy(min_rr=args.min_rr, tp_fraction=args.tp_fraction)
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
             min_score=args.min_score,
@@ -234,6 +249,8 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         close_on_opposite_signal=args.close_on_opposite,
         size_mode=args.size_mode,
         position_size_pct=args.position_size,
+        true_sl=args.true_sl,
+        true_sl_rr=args.min_rr,
     )
     if args.strategy in ("alexg", "alexg2", "institutional"):
         return BacktestConfig(
@@ -317,7 +334,10 @@ def main() -> int:
         print("-" * 90)
         for i, t in enumerate(result.trades, 1):
             sign = "+" if t.pnl >= 0 else ""
-            account_pct = t.pnl_pct * args.leverage
+            account_pct = t.pnl / t.entry_equity if t.entry_equity else 0.0
+            margin_pct = t.pnl / t.margin if t.margin else 0.0
+            lev = args.leverage
+            notional = t.margin * args.leverage
             score_txt = f" score={t.score:.0f}" if t.score else ""
             sl_tp = ""
             if t.stop_loss is not None and t.take_profit is not None:
@@ -325,7 +345,9 @@ def main() -> int:
             print(
                 f"  {i:3d}. {t.side.value:5s} | {t.pattern:30s} | "
                 f"entry {t.entry_price:.5f} -> exit {t.exit_price:.5f}{sl_tp} | "
-                f"PnL {sign}{t.pnl:.2f} ({sign}{account_pct:.2%}){score_txt} [{t.exit_reason}]"
+                f"margin ${t.margin:.2f} · notional ${notional:,.0f} ({lev:.0f}x) | "
+                f"PnL {sign}{t.pnl:.2f} (acct {sign}{account_pct:.2%}, margin {sign}{margin_pct:.2%})"
+                f"{score_txt} [{t.exit_reason}]"
             )
 
     return 0

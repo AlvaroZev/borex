@@ -22,6 +22,7 @@ class Trade:
     take_profit: float | None = None
     score: float = 0.0
     margin: float = 0.0
+    entry_cash: float = 0.0  # cash libre antes de bloquear margen
     entry_equity: float = 0.0
     exit_index: int | None = None
     exit_price: float | None = None
@@ -57,6 +58,13 @@ class Portfolio:
             return max(0.0, self.cash)
         return self.equity_at(self.open_trade.entry_price)
 
+    @property
+    def win_rate(self) -> float | None:
+        if not self.closed_trades:
+            return None
+        wins = sum(1 for t in self.closed_trades if t.pnl > 0)
+        return wins / len(self.closed_trades)
+
     def _pnl_pct(self, trade: Trade, price: float) -> float:
         if trade.side == PositionSide.LONG:
             return (price - trade.entry_price) / trade.entry_price
@@ -67,11 +75,21 @@ class Portfolio:
             return 0.0
         return self.open_trade.margin * self.maintenance_margin_ratio
 
+    def _unrealized_pnl(self, trade: Trade, price: float) -> float:
+        move = self._pnl_pct(trade, price)
+        if self.size_mode == "margin":
+            return trade.margin * move * self.leverage
+        return trade.margin * move
+
+    def notional(self, trade: Trade) -> float:
+        """Tamaño nocional = margen × apalancamiento (broker)."""
+        return trade.margin * self.leverage
+
     def equity_at(self, price: float) -> float:
         if self.open_trade is None:
             return max(0.0, self.cash)
         trade = self.open_trade
-        unrealized = trade.margin * self._pnl_pct(trade, price) * self.leverage
+        unrealized = self._unrealized_pnl(trade, price)
         return max(0.0, self.cash + trade.margin + unrealized)
 
     def margin_level_at(self, price: float) -> float:
@@ -96,11 +114,22 @@ class Portfolio:
             return False
         return self.equity_at(price) <= self._min_equity()
 
+    def margin_stop_out_price(self) -> float | None:
+        """Precio donde se pierde exactamente el margen apostado (no toda la cuenta)."""
+        trade = self.open_trade
+        if trade is None or self.leverage <= 0 or self.size_mode != "margin":
+            return None
+        move = 1.0 / self.leverage
+        if trade.side == PositionSide.LONG:
+            return trade.entry_price * (1.0 - move)
+        return trade.entry_price * (1.0 + move)
+
     def liquidation_price(self) -> float | None:
         trade = self.open_trade
         if trade is None or trade.margin <= 0 or self.leverage <= 0:
             return None
         threshold = self._min_equity()
+        # equity = entry_equity + margin * move * leverage (margin mode)
         move = (threshold - trade.entry_equity) / (trade.margin * self.leverage)
         if trade.side == PositionSide.LONG:
             return trade.entry_price * (1.0 + move)
@@ -125,18 +154,25 @@ class Portfolio:
 
         fixed_risk: con risk_per_trade_pct, pierde ese %% del equity si toca SL.
           El apalancamiento solo cambia el margen bloqueado; el PnL en $ no escala.
-        margin: usa position_size_pct del equity como margen; el PnL en $ escala con leverage.
+        margin: margen = cash libre × position_size_pct (capital no invertido).
+          Nocional = margen × leverage. PnL = nocional × movimiento%%.
         """
         mode = size_mode or self.size_mode
-        entry_equity = self.equity
-        cap = min(entry_equity * self.position_size_pct, self.cash)
+        uninvested = self.cash
 
-        if mode == "margin" or risk_per_trade_pct is None:
+        if mode == "margin":
+            pct = self.position_size_pct
+            return uninvested * pct
+
+        cap = min(self.equity * self.position_size_pct, uninvested)
+
+        if risk_per_trade_pct is None:
             return cap
 
         if stop_loss is None or entry_price <= 0 or self.leverage <= 0:
             return cap
 
+        entry_equity = self.equity
         sl_dist_pct = abs(entry_price - stop_loss) / entry_price
         if sl_dist_pct <= 0:
             return cap
@@ -161,6 +197,7 @@ class Portfolio:
             return False
 
         entry_equity = self.equity
+        entry_cash = self.cash
         margin = self.compute_margin(
             price, stop_loss, risk_per_trade_pct, size_mode=size_mode
         )
@@ -179,6 +216,7 @@ class Portfolio:
             take_profit=take_profit,
             score=score,
             margin=margin,
+            entry_cash=entry_cash,
             entry_equity=entry_equity,
         )
         return True
@@ -201,7 +239,16 @@ class Portfolio:
         trade.pnl_pct = self._pnl_pct(trade, price)
 
         margin = trade.margin
-        trade.pnl = margin * trade.pnl_pct * self.leverage
+        if self.size_mode == "margin":
+            raw_pnl = margin * trade.pnl_pct * self.leverage
+            if raw_pnl <= -margin or reason == "margin_stop":
+                trade.pnl = -margin
+                if reason == "stop_loss":
+                    trade.exit_reason = "margin_stop"
+            else:
+                trade.pnl = raw_pnl
+        else:
+            trade.pnl = margin * trade.pnl_pct
         self.cash += margin + trade.pnl
         self.open_trade = None
 
@@ -210,12 +257,15 @@ class Portfolio:
             trade.pnl = threshold - trade.entry_equity
             self.cash = max(0.0, threshold)
         elif self.cash <= 0:
-            trade.pnl = -trade.entry_equity
-            self.cash = 0.0
+            if self.size_mode == "margin":
+                self.cash = max(0.0, trade.entry_equity - margin)
+            else:
+                trade.pnl = -trade.entry_equity
+                self.cash = 0.0
         else:
             self.cash = max(0.0, self.cash)
 
-        if self.cash <= 0:
+        if self.cash <= 0 and self.size_mode != "margin":
             self.liquidated = True
 
         self.closed_trades.append(trade)

@@ -37,6 +37,8 @@ def create_app(static_dir: Path) -> FastAPI:
             "timeframe": s.timeframe,
             "strategy": s.strategy_name,
             "leverage": s.leverage,
+            "inversed": s.inversed,
+            "tp_fraction": s.tp_fraction,
             "summary": s.summary_text,
             "total_return_pct": s.total_return_pct,
             "win_rate": s.win_rate,

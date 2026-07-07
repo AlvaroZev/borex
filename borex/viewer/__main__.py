@@ -48,24 +48,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--leverage", "-l", type=_parse_leverage, default=500.0)
     parser.add_argument("--min-score", type=float, default=70.0)
     parser.add_argument("--min-rr", type=float, default=2.0)
+    parser.add_argument(
+        "--tp-fraction",
+        type=float,
+        default=1.0,
+        help="TP a fracción del camino al AOI (1.0=completo, 0.7=70%%)",
+    )
     parser.add_argument("--sl-mult", type=float, default=1.0)
     parser.add_argument("--risk-per-trade", type=_parse_risk_pct, default=0.01)
     parser.add_argument(
         "--size-mode",
         choices=["fixed_risk", "margin"],
         default="margin",
-        help="margin = leverage escala PnL; fixed_risk = riesgo fijo al SL",
+        help="margin: margen = cash libre × position-size; RR dinámico = 1/winrate",
     )
     parser.add_argument(
         "--position-size",
         type=float,
-        default=0.02,
-        help="Fracción del equity como margen (size-mode=margin)",
+        default=0.01,
+        help="Fracción del cash libre como margen (default: 0.01 = 1%%). Usa 0.01 para arriesgar 1%% por trade.",
     )
     parser.add_argument(
         "--close-on-opposite",
         action="store_true",
         help="Cerrar posición si llega señal opuesta (default: off)",
+    )
+    parser.add_argument(
+        "--true-sl",
+        action="store_true",
+        help="SL al wipe del margen; TP a min-rr× ese riesgo (solo margin mode)",
     )
     parser.add_argument(
         "--inversed",
@@ -97,7 +108,7 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             sl_mult=args.sl_mult,
         )
     if args.strategy == "alexg2":
-        return AlexG2Strategy(min_rr=args.min_rr)
+        return AlexG2Strategy(min_rr=args.min_rr, tp_fraction=args.tp_fraction)
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
             min_score=args.min_score,
@@ -116,6 +127,8 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         inversed=args.inversed,
         size_mode=args.size_mode,
         position_size_pct=args.position_size,
+        true_sl=args.true_sl,
+        true_sl_rr=args.min_rr,
     )
     if args.strategy in ("alexg", "alexg2", "institutional"):
         return BacktestConfig(**base, stop_loss_pct=None, take_profit_pct=None)
@@ -164,6 +177,9 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
         total_return_pct=result.total_return_pct,
         win_rate=result.win_rate,
         total_trades=result.total_trades,
+        inversed=args.inversed,
+        tp_fraction=args.tp_fraction,
+        true_sl=args.true_sl,
     )
 
 
