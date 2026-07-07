@@ -16,8 +16,8 @@ from borex.strategy.base import Strategy
 
 def _parse_leverage(value: str) -> float:
     leverage = float(value)
-    if not 1 <= leverage <= 1000:
-        raise argparse.ArgumentTypeError("leverage debe estar entre 1 y 1000")
+    if not 1 <= leverage <= 5000:
+        raise argparse.ArgumentTypeError("leverage debe estar entre 1 y 5000")
     return leverage
 
 
@@ -128,6 +128,21 @@ def parse_args() -> argparse.Namespace:
         help="Riesgo fijo por trade si toca SL (ej. 0.01 = 1%% del equity). AlexG: 1-2%%",
     )
     parser.add_argument(
+        "--size-mode",
+        choices=["fixed_risk", "margin"],
+        default="fixed_risk",
+        help=(
+            "fixed_risk: riesgo fijo en $ al SL (leverage no cambia PnL). "
+            "margin: margen = equity × position-size; leverage escala PnL."
+        ),
+    )
+    parser.add_argument(
+        "--position-size",
+        type=float,
+        default=1.0,
+        help="Fracción del equity usada como margen en size-mode=margin (default: 1)",
+    )
+    parser.add_argument(
         "--patterns",
         nargs="*",
         help="Patrones a usar (solo candles). Ej: hammer bullish_engulfing",
@@ -139,6 +154,11 @@ def parse_args() -> argparse.Namespace:
         "--inversed",
         action="store_true",
         help="Invertir trades: compras pasan a ventas y viceversa",
+    )
+    parser.add_argument(
+        "--close-on-opposite",
+        action="store_true",
+        help="Cerrar posición abierta si llega una señal en dirección opuesta (default: off)",
     )
     parser.add_argument(
         "--spread-pips",
@@ -161,7 +181,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--use-cache",
         action="store_true",
-        help="Solo datos locales (data/cache). No llama a Yahoo.",
+        help="Solo datos locales (Dukascopy parquet en data/cache, luego Yahoo CSV).",
     )
     parser.add_argument(
         "--no-cache",
@@ -211,6 +231,9 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         slippage_pips=args.slippage_pips,
         commission_per_trade=args.commission,
         risk_per_trade_pct=args.risk_per_trade,
+        close_on_opposite_signal=args.close_on_opposite,
+        size_mode=args.size_mode,
+        position_size_pct=args.position_size,
     )
     if args.strategy in ("alexg", "alexg2", "institutional"):
         return BacktestConfig(

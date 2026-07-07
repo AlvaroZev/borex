@@ -154,8 +154,29 @@ def load_market_data(
     cache_mode: str = "auto",
     cache_dir: Path | None = None,
 ) -> list[Candle]:
-    """Punto único de carga: cache local o Yahoo según modo."""
+    """Load OHLCV: Dukascopy parquet cache first, then Yahoo CSV cache / live."""
+    from borex.config import CACHE_DIR as DUKA_ROOT
     from borex.data.cache import load_yfinance_cached
+    from borex.data.period import normalize_timeframe, slice_df_by_period
+    from borex.data.store import is_cached, load_ohlcv
+
+    root = cache_dir or DUKA_ROOT
+    timeframe = normalize_timeframe(interval)
+
+    if cache_mode != "off" and is_cached(symbol, timeframe, root):
+        df = load_ohlcv(symbol, timeframe, root)
+        df = slice_df_by_period(df, period)
+        if df.empty:
+            raise ValueError(
+                f"Dukascopy cache for {symbol} {timeframe} has no bars in period {period!r}"
+            )
+        return dataframe_to_candles(df)
+
+    if cache_mode == "only":
+        raise FileNotFoundError(
+            f"No Dukascopy cache for {symbol} {timeframe} under {root}. "
+            f"Copy data/cache from borex or run without --use-cache."
+        )
 
     return load_yfinance_cached(
         symbol, period, interval, cache_dir=cache_dir, mode=cache_mode

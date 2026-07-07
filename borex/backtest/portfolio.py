@@ -46,6 +46,7 @@ class Portfolio:
     open_trade: Trade | None = None
     closed_trades: list[Trade] = field(default_factory=list)
     liquidated: bool = False
+    size_mode: str = "fixed_risk"
 
     def __post_init__(self) -> None:
         self.cash = self.initial_capital
@@ -117,20 +118,23 @@ class Portfolio:
         entry_price: float,
         stop_loss: float | None = None,
         risk_per_trade_pct: float | None = None,
+        size_mode: str | None = None,
     ) -> float:
         """
-        Tamaño de posición. Con risk_per_trade_pct, pierde ese %% del equity si toca SL
-        (gestión AlexG: riesgo fijo por trade, reward >= min_rr × riesgo).
+        Tamaño de posición.
+
+        fixed_risk: con risk_per_trade_pct, pierde ese %% del equity si toca SL.
+          El apalancamiento solo cambia el margen bloqueado; el PnL en $ no escala.
+        margin: usa position_size_pct del equity como margen; el PnL en $ escala con leverage.
         """
+        mode = size_mode or self.size_mode
         entry_equity = self.equity
         cap = min(entry_equity * self.position_size_pct, self.cash)
 
-        if (
-            risk_per_trade_pct is None
-            or stop_loss is None
-            or entry_price <= 0
-            or self.leverage <= 0
-        ):
+        if mode == "margin" or risk_per_trade_pct is None:
+            return cap
+
+        if stop_loss is None or entry_price <= 0 or self.leverage <= 0:
             return cap
 
         sl_dist_pct = abs(entry_price - stop_loss) / entry_price
@@ -151,12 +155,15 @@ class Portfolio:
         take_profit: float | None = None,
         score: float = 0.0,
         risk_per_trade_pct: float | None = None,
+        size_mode: str | None = None,
     ) -> bool:
         if not self.can_open():
             return False
 
         entry_equity = self.equity
-        margin = self.compute_margin(price, stop_loss, risk_per_trade_pct)
+        margin = self.compute_margin(
+            price, stop_loss, risk_per_trade_pct, size_mode=size_mode
+        )
         if margin <= 0:
             return False
 

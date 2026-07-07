@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Borex Trade Viewer</title>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --green: #22c55e;
+      --red: #ef4444;
+      --accent: #3b82f6;
+      --yellow: #fbbf24;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; }
+    .meta { display: flex; flex-wrap: wrap; gap: 0.75rem; font-size: 0.85rem; color: var(--muted); }
+    .meta span strong { color: var(--text); }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .badge.win { background: rgba(34,197,94,0.2); color: var(--green); }
+    .badge.loss { background: rgba(239,68,68,0.2); color: var(--red); }
+    main { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+    aside {
+      width: 300px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .aside-title {
+      padding: 0.65rem 1rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .trade-list-wrap {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+    .trade-list { list-style: none; }
+    .trade-item {
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .trade-item:hover { background: rgba(59,130,246,0.08); }
+    .trade-item.active { background: rgba(59,130,246,0.15); border-left: 3px solid var(--accent); }
+    .trade-item .row1 { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.35rem; }
+    .trade-item .side { font-weight: 600; text-transform: uppercase; font-size: 0.8rem; }
+    .trade-item .side.long { color: var(--green); }
+    .trade-item .side.short { color: var(--red); }
+    .trade-item .pnl { font-weight: 600; font-size: 0.9rem; }
+    .trade-item .detail { font-size: 0.75rem; color: var(--muted); line-height: 1.4; }
+    section.content { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+    .trade-header {
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      flex-shrink: 0;
+    }
+    .trade-header h2 { font-size: 1rem; margin-bottom: 0.5rem; }
+    .tags { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
+    .tag {
+      background: rgba(139,156,179,0.15);
+      color: var(--muted);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      text-transform: capitalize;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 0.5rem;
+      font-size: 0.8rem;
+    }
+    .stats div { color: var(--muted); }
+    .stats strong { display: block; color: var(--text); margin-top: 0.1rem; }
+    .signal-callout {
+      margin: 0.5rem 0 0.65rem;
+      padding: 0.55rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid rgba(251, 191, 36, 0.35);
+      background: rgba(251, 191, 36, 0.08);
+      font-size: 0.82rem;
+      line-height: 1.45;
+    }
+    .signal-callout strong { color: var(--yellow); }
+    .signal-callout .ohlc {
+      display: block;
+      margin-top: 0.25rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+      font-family: Consolas, "Courier New", monospace;
+    }
+    #chart-wrap {
+      display: none;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #chart {
+      height: 340px;
+      max-height: 38vh;
+      flex-shrink: 0;
+      width: 100%;
+    }
+    .legend {
+      padding: 0.45rem 1.25rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      flex-shrink: 0;
+    }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+    .empty {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      padding: 2rem;
+      text-align: center;
+    }
+    .loading { padding: 2rem; text-align: center; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Borex Trade Viewer</h1>
+    <div class="meta" id="session-meta">Loading…</div>
+  </header>
+  <main>
+    <aside>
+      <div class="aside-title" id="trade-list-title">Trades</div>
+      <div class="trade-list-wrap">
+        <ul class="trade-list" id="trade-list"></ul>
+      </div>
+    </aside>
+    <section class="content">
+      <div id="trade-panel" class="empty">Select a trade to inspect the chart</div>
+      <div id="chart-wrap">
+        <div class="trade-header" id="trade-header"></div>
+        <div id="chart"></div>
+        <div class="legend">
+          <span><i style="background:#fbbf24"></i> Yellow marker = entry signal (pattern name on chart)</span>
+          <span><i style="background:#22c55e"></i> Entry / TP</span>
+          <span><i style="background:#ef4444"></i> Stop loss</span>
+          <span><i style="background:#3b82f6"></i> Support AOI</span>
+          <span><i style="background:#a855f7"></i> Resistance AOI</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    let chart = null;
+    let candleSeries = null;
+    let priceLines = [];
+    let session = null;
+    let pricePrecision = 5;
+
+    function detectPrecision(symbol) {
+      return (symbol || "").toUpperCase().includes("JPY") ? 3 : 5;
+    }
+
+    function fmtPct(n) {
+      const sign = n >= 0 ? "+" : "";
+      return sign + (n * 100).toFixed(2) + "%";
+    }
+
+    function fmtPrice(p, precision) {
+      if (p == null) return "—";
+      const d = precision ?? pricePrecision;
+      return Number(p).toFixed(d);
+    }
+
+    function fmtSignalLabel(t) {
+      return t.signal_label || (t.meta && t.meta.signal
+        ? t.meta.signal.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+        : "Signal");
+    }
+
+    function renderSessionMeta() {
+      const el = document.getElementById("session-meta");
+      const retClass = session.total_return_pct >= 0 ? "win" : "loss";
+      el.innerHTML = `
+        <span><strong>${session.strategy}</strong> · ${session.symbol} · ${session.timeframe}</span>
+        <span>Leverage <strong>${session.leverage}x</strong></span>
+        <span>Trades <strong>${session.total_trades}</strong></span>
+        <span>Win rate <strong>${(session.win_rate * 100).toFixed(1)}%</strong></span>
+        <span class="badge ${retClass}">Return ${fmtPct(session.total_return_pct)}</span>
+      `;
+    }
+
+    function renderTradeList() {
+      const list = document.getElementById("trade-list");
+      document.getElementById("trade-list-title").textContent =
+        `Trades (${session.trades.length})`;
+      if (!session.trades.length) {
+        list.innerHTML = '<li class="loading">No trades in this run</li>';
+        return;
+      }
+      list.innerHTML = session.trades.map((t, i) => {
+        const win = t.pnl > 0;
+        const meta = t.meta || {};
+        const setup = [meta.trend, meta.setup, meta.aoi_kind].filter(Boolean).join(" · ");
+        const sig = fmtSignalLabel(t);
+        return `
+          <li class="trade-item" data-id="${i}">
+            <div class="row1">
+              <span class="side ${t.side}">#${i + 1} ${t.side}</span>
+              <span class="pnl" style="color:${win ? 'var(--green)' : 'var(--red)'}">${win ? '+' : ''}$${t.pnl.toFixed(2)}</span>
+            </div>
+            <div class="detail"><strong style="color:var(--yellow)">${sig}</strong> · ${setup || t.pattern}</div>
+            <div class="detail">${t.exit_reason} · RR ${t.planned_rr}:1 · acct ${fmtPct(t.account_pct ?? 0)} · margin ${fmtPct(t.pnl_pct)}</div>
+          </li>
+        `;
+      }).join("");
+
+      list.querySelectorAll(".trade-item").forEach((el) => {
+        el.addEventListener("click", () => selectTrade(Number(el.dataset.id)));
+      });
+    }
+
+    function clearPriceLines() {
+      priceLines.forEach((pl) => { try { candleSeries.removePriceLine(pl); } catch (_) {} });
+      priceLines = [];
+    }
+
+    function destroyChart() {
+      clearPriceLines();
+      if (chart) { chart.remove(); chart = null; candleSeries = null; }
+    }
+
+    function renderChart(data) {
+      destroyChart();
+      document.getElementById("trade-panel").style.display = "none";
+      const wrap = document.getElementById("chart-wrap");
+      wrap.style.display = "flex";
+
+      const t = data.trade;
+      const meta = t.meta || {};
+      const win = t.pnl > 0;
+      const prec = data.price_precision ?? pricePrecision;
+      const minMove = data.price_min_move ?? (prec === 3 ? 0.001 : 0.00001);
+      const sig = fmtSignalLabel(t);
+      const sc = t.signal_candle || {};
+      const aoiTxt = meta.aoi_kind ? `${meta.aoi_kind} AOI` : "AOI";
+      const setupTxt = meta.setup ? `${meta.setup} setup` : "setup";
+
+      document.getElementById("trade-header").innerHTML = `
+        <h2>Trade #${t.id + 1} — ${t.side.toUpperCase()} <span class="badge ${win ? 'win' : 'loss'}">${t.exit_reason.replace(/_/g, " ")}</span></h2>
+        <div class="signal-callout">
+          Entry triggered by <strong>${sig}</strong> (${setupTxt} at ${aoiTxt}, ${meta.trend || "—"} trend)
+          <span class="ohlc">Signal candle O ${fmtPrice(sc.open, prec)} · H ${fmtPrice(sc.high, prec)} · L ${fmtPrice(sc.low, prec)} · C ${fmtPrice(sc.close, prec)}</span>
+        </div>
+        <div class="tags">
+          ${meta.trend ? `<span class="tag">Trend: ${meta.trend}</span>` : ""}
+          ${meta.setup ? `<span class="tag">Setup: ${meta.setup}</span>` : ""}
+          ${meta.aoi_kind ? `<span class="tag">AOI: ${meta.aoi_kind}</span>` : ""}
+          <span class="tag">Signal: ${sig}</span>
+        </div>
+        <div class="stats">
+          <div>Entry<strong>${fmtPrice(t.entry_price, prec)}</strong></div>
+          <div>Exit<strong>${fmtPrice(t.exit_price, prec)}</strong></div>
+          <div>Stop loss<strong>${fmtPrice(t.stop_loss, prec)}</strong></div>
+          <div>Take profit<strong>${fmtPrice(t.take_profit, prec)}</strong></div>
+          <div>Planned RR<strong>${t.planned_rr}:1</strong></div>
+          <div>PnL<strong style="color:${win ? 'var(--green)' : 'var(--red)'}">$${t.pnl.toFixed(2)} (acct ${fmtPct(t.account_pct ?? 0)}, margin ${fmtPct(t.pnl_pct)})</strong></div>
+          <div>Signal bar<strong>${t.signal_time ? new Date(t.signal_time).toLocaleString() : "—"}</strong></div>
+          <div>Entry bar<strong>${new Date(t.entry_time).toLocaleString()}</strong></div>
+          <div>Exit bar<strong>${t.exit_time ? new Date(t.exit_time).toLocaleString() : "—"}</strong></div>
+        </div>
+      `;
+
+      const container = document.getElementById("chart");
+      const chartHeight = Math.min(340, Math.max(260, Math.floor(window.innerHeight * 0.38)));
+      container.style.height = chartHeight + "px";
+
+      chart = LightweightCharts.createChart(container, {
+        width: container.clientWidth,
+        height: chartHeight,
+        layout: { background: { color: "#0f1419" }, textColor: "#8b9cb3" },
+        grid: { vertLines: { color: "#1e293b" }, horzLines: { color: "#1e293b" } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: {
+          borderColor: "#2d3a4f",
+          scaleMargins: { top: 0.08, bottom: 0.08 },
+        },
+        localization: {
+          priceFormatter: (p) => fmtPrice(p, prec),
+        },
+        timeScale: { borderColor: "#2d3a4f", timeVisible: true, secondsVisible: false },
+      });
+
+      candleSeries = chart.addCandlestickSeries({
+        priceFormat: { type: "price", precision: prec, minMove: minMove },
+        upColor: "#22c55e",
+        downColor: "#ef4444",
+        borderUpColor: "#22c55e",
+        borderDownColor: "#ef4444",
+        wickUpColor: "#22c55e",
+        wickDownColor: "#ef4444",
+      });
+
+      candleSeries.setData(data.candles);
+      candleSeries.setMarkers(data.markers);
+
+      data.levels.forEach((lvl) => {
+        const pl = candleSeries.createPriceLine({
+          price: lvl.price,
+          color: lvl.color,
+          lineWidth: lvl.title.includes("AOI") || lvl.title.includes("support") || lvl.title.includes("resistance") ? 1 : 2,
+          lineStyle: lvl.lineStyle === 2 ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid,
+          axisLabelVisible: true,
+          title: lvl.title,
+        });
+        priceLines.push(pl);
+      });
+
+      chart.timeScale().fitContent();
+      const ro = new ResizeObserver(() => {
+        const h = Math.min(340, Math.max(260, Math.floor(window.innerHeight * 0.38)));
+        container.style.height = h + "px";
+        chart.applyOptions({ width: container.clientWidth, height: h });
+      });
+      ro.observe(container.parentElement);
+    }
+
+    async function selectTrade(id) {
+      document.querySelectorAll(".trade-item").forEach((el) => {
+        const active = Number(el.dataset.id) === id;
+        el.classList.toggle("active", active);
+        if (active) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      });
+      const res = await fetch(`/api/trades/${id}/chart`);
+      const data = await res.json();
+      renderChart(data);
+    }
+
+    async function init() {
+      try {
+        const res = await fetch("/api/session");
+        session = await res.json();
+        pricePrecision = detectPrecision(session.symbol);
+        renderSessionMeta();
+        renderTradeList();
+        if (session.trades.length) selectTrade(0);
+      } catch (e) {
+        document.getElementById("session-meta").textContent = "Failed to load session: " + e.message;
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

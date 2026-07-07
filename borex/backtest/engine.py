@@ -22,7 +22,8 @@ class BacktestConfig:
     stop_loss_pct: float | None = 0.02  # 2% stop loss
     take_profit_pct: float | None = 0.04  # 4% take profit
     risk_per_trade_pct: float | None = None  # riesgo fijo si SL toca (ej. 0.01 = 1%)
-    close_on_opposite_signal: bool = True
+    size_mode: str = "fixed_risk"  # fixed_risk | margin
+    close_on_opposite_signal: bool = False
     spread_pips: float = 0.0
     slippage_pips: float = 0.0
     commission_per_trade: float = 0.0
@@ -61,6 +62,7 @@ class BacktestResult:
             f"Símbolo: {self.symbol} ({tf})",
             f"Capital inicial: ${self.config.initial_capital:,.2f}",
             f"Apalancamiento: {self.config.leverage:g}x",
+            f"Size mode: {self.config.size_mode}",
             f"Invertido: {'sí' if self.config.inversed else 'no'}",
             f"Capital final: ${self.final_equity:,.2f}",
             f"Retorno total: {self.total_return_pct:.2%}",
@@ -147,6 +149,7 @@ class BacktestEngine:
             position_size_pct=self.config.position_size_pct,
             leverage=self.config.leverage,
             maintenance_margin_ratio=self.config.maintenance_margin_ratio,
+            size_mode=self.config.size_mode,
         )
         equity_curve: list[float] = [portfolio.equity]
         peak_equity = portfolio.equity
@@ -279,6 +282,7 @@ class BacktestEngine:
                 take_profit=take_profit,
                 score=signal.score,
                 risk_per_trade_pct=self.config.risk_per_trade_pct,
+                size_mode=self.config.size_mode,
             )
 
     def _mark_equity(self, portfolio: Portfolio, candle: Candle) -> float:

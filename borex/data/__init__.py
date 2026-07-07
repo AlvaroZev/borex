@@ -1,3 +1,4 @@
+from borex.config import CACHE_DIR
 from borex.data.cache import (
     DEFAULT_CACHE_DIR,
     cache_exists,
@@ -15,6 +16,7 @@ from borex.data.loader import (
     resample_candles,
 )
 from borex.data.mtf import MultiTimeframeContext, build_full_mtf_context
+from borex.data.store import is_cached, list_cached, load_ohlcv
 from borex.data.timeframe import (
     filter_intervals_for_execution,
     interval_to_minutes,
@@ -22,14 +24,18 @@ from borex.data.timeframe import (
 )
 
 __all__ = [
+    "CACHE_DIR",
     "MultiTimeframeContext",
     "build_full_mtf_context",
     "dataframe_to_candles",
     "filter_intervals_for_execution",
     "interval_to_minutes",
+    "is_cached",
+    "list_cached",
     "load_csv",
     "load_filter_candles",
     "load_market_data",
+    "load_ohlcv",
     "load_yfinance",
     "load_yfinance_cached",
     "load_cache",
