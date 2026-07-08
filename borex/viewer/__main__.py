@@ -5,8 +5,9 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from borex.alexg import AlexG2Strategy, AlexGMethodStrategy
-from borex.backtest import BacktestConfig, BacktestEngine
+from borex.alexg import AlexG2Strategy, AlexG3Strategy, AlexGMethodStrategy
+from borex.alexg.multi_market import default_forex_universe, pick_master_symbol
+from borex.backtest import BacktestConfig, BacktestEngine, MultiMarketEngine
 from borex.data import build_full_mtf_context, load_csv, load_market_data
 from borex.institutional import InstitutionalFlowStrategy
 from borex.strategy import CandlePatternStrategy
@@ -37,7 +38,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "alexg2", "institutional"],
+        choices=["candles", "alexg", "alexg2", "alexg3", "institutional"],
         default="alexg2",
     )
     parser.add_argument("--symbol", "-s", default="EURUSD=X")
@@ -79,11 +80,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="SL al wipe del margen; TP a min-rr× ese riesgo (solo margin mode)",
     )
     parser.add_argument(
+        "--allow-false-positives",
+        action="store_true",
+        help="Desactiva filtro de calidad por patrón (default: filtro activo)",
+    )
+    parser.add_argument(
+        "--no-momentum",
+        action="store_true",
+        help="Desactiva señales de confirmación momentum (alexg2/alexg3)",
+    )
+    parser.add_argument(
         "--inversed",
         action="store_true",
         help="Invertir trades: buy ↔ sell (y swap SL/TP)",
     )
-    parser.add_argument("--filter-mode", choices=["trend", "off"], default="trend")
+    parser.add_argument(
+        "--symbols",
+        nargs="*",
+        help="AlexG3: pares multi-mercado (default: universo FX)",
+    )
+    parser.add_argument("--max-positions", type=int, default=5)
+    parser.add_argument("--strength-lookback", type=int, default=24)
+    parser.add_argument("--min-currency-edge", type=float, default=0.00005)
+    parser.add_argument("--min-confirming-pairs", type=int, default=2)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
@@ -107,8 +126,24 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             min_rr=args.min_rr,
             sl_mult=args.sl_mult,
         )
+    disabled = ("momentum",) if args.no_momentum else ()
     if args.strategy == "alexg2":
-        return AlexG2Strategy(min_rr=args.min_rr, tp_fraction=args.tp_fraction)
+        return AlexG2Strategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+        )
+    if args.strategy == "alexg3":
+        return AlexG3Strategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+        )
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
             min_score=args.min_score,
@@ -130,14 +165,52 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         true_sl=args.true_sl,
         true_sl_rr=args.min_rr,
     )
-    if args.strategy in ("alexg", "alexg2", "institutional"):
+    if args.strategy in ("alexg", "alexg2", "alexg3", "institutional"):
         return BacktestConfig(**base, stop_loss_pct=None, take_profit_pct=None)
     return BacktestConfig(**base)
 
 
 def run_session(args: argparse.Namespace) -> ViewerSession:
-    use_mtf = args.strategy in ("alexg", "alexg2", "institutional")
     cache_mode = _cache_mode(args)
+
+    if args.strategy == "alexg3":
+        universe = args.symbols if args.symbols else default_forex_universe()
+        if args.symbol not in universe:
+            universe = [args.symbol] + list(universe)
+        candles_by_symbol = {}
+        for sym in universe:
+            try:
+                candles_by_symbol[sym] = load_market_data(
+                    sym, args.period, args.interval, cache_mode=cache_mode
+                )
+            except Exception:
+                continue
+        master = pick_master_symbol(candles_by_symbol, args.symbol)
+        strategy = _build_strategy(args)
+        config = _build_config(args)
+        engine = MultiMarketEngine(strategy, config, max_positions=args.max_positions)
+        result = engine.run(
+            candles_by_symbol, timeframe=args.interval, master_symbol=master
+        )
+        display_symbol = args.symbol if args.symbol in candles_by_symbol else master
+        return ViewerSession(
+            symbol=f"{display_symbol} (+{len(candles_by_symbol)-1} pairs)",
+            timeframe=args.interval,
+            strategy_name=strategy.name,
+            leverage=args.leverage,
+            candles=candles_by_symbol.get(display_symbol, candles_by_symbol[master]),
+            trades=result.trades,
+            candles_by_symbol=candles_by_symbol,
+            summary_text=result.summary(),
+            total_return_pct=result.total_return_pct,
+            win_rate=result.win_rate,
+            total_trades=result.total_trades,
+            inversed=args.inversed,
+            tp_fraction=args.tp_fraction,
+            true_sl=args.true_sl,
+        )
+
+    use_mtf = args.strategy in ("alexg", "alexg2", "institutional")
     mtf = None
 
     if args.csv:

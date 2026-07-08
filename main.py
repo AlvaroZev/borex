@@ -6,8 +6,9 @@ from __future__ import annotations
 import argparse
 import sys
 
-from borex.alexg import AlexG2Strategy, AlexGMethodStrategy
-from borex.backtest import BacktestConfig, BacktestEngine
+from borex.alexg import AlexG2Strategy, AlexG3Strategy, AlexGMethodStrategy
+from borex.alexg.multi_market import default_forex_universe, pick_master_symbol
+from borex.backtest import BacktestConfig, BacktestEngine, MultiMarketEngine
 from borex.institutional import InstitutionalFlowStrategy
 from borex.data import build_full_mtf_context, load_csv, load_market_data
 from borex.strategy import CandlePatternStrategy
@@ -41,12 +42,41 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "alexg2", "institutional"],
+        choices=["candles", "alexg", "alexg2", "alexg3", "institutional"],
         default="candles",
-        help="Estrategia: candles, alexg, alexg2 o institutional",
+        help="Estrategia: candles, alexg, alexg2, alexg3 o institutional",
     )
     parser.add_argument(
-        "--symbol", "-s", default="EURUSD=X", help="Símbolo (yfinance)"
+        "--symbol", "-s", default="EURUSD=X", help="Símbolo principal (yfinance)"
+    )
+    parser.add_argument(
+        "--symbols",
+        nargs="*",
+        help="AlexG3: pares para análisis multi-mercado (default: universo FX)",
+    )
+    parser.add_argument(
+        "--max-positions",
+        type=int,
+        default=5,
+        help="AlexG3: máximo de posiciones abiertas a la vez",
+    )
+    parser.add_argument(
+        "--strength-lookback",
+        type=int,
+        default=24,
+        help="AlexG3: velas para medir fortaleza de divisa",
+    )
+    parser.add_argument(
+        "--min-currency-edge",
+        type=float,
+        default=0.00005,
+        help="AlexG3: mínima diferencia de strength base vs quote",
+    )
+    parser.add_argument(
+        "--min-confirming-pairs",
+        type=int,
+        default=2,
+        help="AlexG3: pares que deben confirmar fortaleza/debilidad de una divisa",
     )
     parser.add_argument(
         "--period", "-p", default="30d", help="Periodo histórico (yfinance)"
@@ -176,6 +206,19 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--allow-false-positives",
+        action="store_true",
+        help=(
+            "Desactiva el filtro de calidad por patrón en AlexG2/AlexG3 "
+            "(por defecto el filtro está activo)."
+        ),
+    )
+    parser.add_argument(
+        "--no-momentum",
+        action="store_true",
+        help="Desactiva señales de confirmación momentum (alexg2/alexg3)",
+    )
+    parser.add_argument(
         "--spread-pips",
         type=float,
         default=0.0,
@@ -222,8 +265,24 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             max_tp_pct=args.max_tp_pct,
             sl_mult=args.sl_mult,
         )
+    disabled = ("momentum",) if args.no_momentum else ()
     if args.strategy == "alexg2":
-        return AlexG2Strategy(min_rr=args.min_rr, tp_fraction=args.tp_fraction)
+        return AlexG2Strategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+        )
+    if args.strategy == "alexg3":
+        return AlexG3Strategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+        )
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
             min_score=args.min_score,
@@ -252,7 +311,7 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         true_sl=args.true_sl,
         true_sl_rr=args.min_rr,
     )
-    if args.strategy in ("alexg", "alexg2", "institutional"):
+    if args.strategy in ("alexg", "alexg2", "alexg3", "institutional"):
         return BacktestConfig(
             **base,
             stop_loss_pct=None,
@@ -265,9 +324,65 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
     )
 
 
+def _run_alexg3(args: argparse.Namespace) -> int:
+    cache_mode = _cache_mode(args)
+    universe = args.symbols if args.symbols else default_forex_universe()
+    if args.symbol not in universe:
+        universe = [args.symbol] + list(universe)
+
+    candles_by_symbol: dict = {}
+    for sym in universe:
+        try:
+            candles_by_symbol[sym] = load_market_data(
+                sym, args.period, args.interval, cache_mode=cache_mode
+            )
+        except Exception as exc:
+            print(f"  omitido {sym}: {exc}", file=sys.stderr)
+
+    if len(candles_by_symbol) < 2:
+        print(
+            "AlexG3 necesita al menos 2 pares con datos. Usa --use-cache.",
+            file=sys.stderr,
+        )
+        return 1
+
+    master = pick_master_symbol(candles_by_symbol, args.symbol)
+    strategy = _build_strategy(args)
+    config = _build_config(args)
+    engine = MultiMarketEngine(
+        strategy, config, max_positions=args.max_positions
+    )
+    result = engine.run(
+        candles_by_symbol,
+        timeframe=args.interval,
+        master_symbol=master,
+    )
+
+    print(result.summary())
+    print(f"Pares cargados: {len(result.symbols)} (master: {result.master_symbol})")
+    print(f"Velas master: {len(candles_by_symbol[master])}")
+    print()
+
+    if args.verbose and result.trades:
+        print("Trades:")
+        print("-" * 100)
+        for i, t in enumerate(result.trades, 1):
+            sign = "+" if t.pnl >= 0 else ""
+            sym = t.symbol or "?"
+            entry_cap = t.entry_cash or t.entry_equity
+            print(
+                f"  {i:3d}. {sym:10s} {t.side.value:5s} | {t.pattern[:50]:50s} | "
+                f"cap ${entry_cap:,.2f} | PnL {sign}{t.pnl:.2f} [{t.exit_reason}]"
+            )
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     use_mtf = args.mtf or args.strategy in ("alexg", "alexg2", "institutional")
+
+    if args.strategy == "alexg3":
+        return _run_alexg3(args)
 
     mtf = None
     cache_mode = _cache_mode(args)
@@ -303,7 +418,7 @@ def main() -> int:
 
     min_bars = (
         80
-        if args.strategy in ("alexg", "alexg2")
+        if args.strategy in ("alexg", "alexg2", "alexg3")
         else 60
         if args.strategy == "institutional"
         else 20
@@ -338,6 +453,7 @@ def main() -> int:
             margin_pct = t.pnl / t.margin if t.margin else 0.0
             lev = args.leverage
             notional = t.margin * args.leverage
+            entry_cap = t.entry_cash or t.entry_equity
             score_txt = f" score={t.score:.0f}" if t.score else ""
             sl_tp = ""
             if t.stop_loss is not None and t.take_profit is not None:
@@ -345,7 +461,7 @@ def main() -> int:
             print(
                 f"  {i:3d}. {t.side.value:5s} | {t.pattern:30s} | "
                 f"entry {t.entry_price:.5f} -> exit {t.exit_price:.5f}{sl_tp} | "
-                f"margin ${t.margin:.2f} · notional ${notional:,.0f} ({lev:.0f}x) | "
+                f"cap ${entry_cap:,.2f} · margin ${t.margin:.2f} · notional ${notional:,.0f} ({lev:.0f}x) | "
                 f"PnL {sign}{t.pnl:.2f} (acct {sign}{account_pct:.2%}, margin {sign}{margin_pct:.2%})"
                 f"{score_txt} [{t.exit_reason}]"
             )

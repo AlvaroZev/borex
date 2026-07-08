@@ -155,6 +155,113 @@ def _entry_at_aoi(
     return None
 
 
+def _rsi(candles: list[Candle], index: int, period: int = 14) -> float | None:
+    if index <= period:
+        return None
+    gains = 0.0
+    losses = 0.0
+    start = index - period + 1
+    for i in range(start, index + 1):
+        diff = candles[i].close - candles[i - 1].close
+        if diff >= 0:
+            gains += diff
+        else:
+            losses += -diff
+    if losses == 0:
+        return 100.0
+    rs = gains / losses if losses > 0 else 0.0
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _avg_volume(candles: list[Candle], index: int, lookback: int = 20) -> float:
+    start = max(0, index - lookback + 1)
+    window = candles[start : index + 1]
+    if not window:
+        return 0.0
+    return sum(c.volume for c in window) / len(window)
+
+
+def _volume_ok(candles: list[Candle], index: int, min_mult: float) -> bool:
+    avg_vol = _avg_volume(candles, index)
+    curr_vol = candles[index].volume
+    # Forex data can have zero/noisy volume; only enforce if volume exists.
+    if avg_vol <= 0 or curr_vol <= 0:
+        return True
+    return curr_vol >= avg_vol * min_mult
+
+
+def passes_confirmation_quality_filter(
+    candles: list[Candle],
+    index: int,
+    action: SignalAction,
+    _setup_kind: str,
+    signal_name: str,
+) -> bool:
+    curr = candles[index]
+    avg = avg_body(candles[: index + 1])
+    if avg <= 0:
+        return True
+    body = curr.body
+    rng = max(curr.range, 1e-9)
+    rsi = _rsi(candles, index)
+
+    if signal_name in ("bullish_engulfing", "bearish_engulfing"):
+        if index < 1:
+            return False
+        prev = candles[index - 1]
+        if body < avg * 0.8 or body < prev.body * 1.1:
+            return False
+        if signal_name == "bullish_engulfing" and rsi is not None and rsi > 45:
+            return False
+        if signal_name == "bearish_engulfing" and rsi is not None and rsi < 55:
+            return False
+        return _volume_ok(candles, index, 1.1)
+
+    if signal_name == "rejection":
+        wick_ratio = (
+            (curr.lower_wick / max(body, 1e-9))
+            if action == SignalAction.BUY
+            else (curr.upper_wick / max(body, 1e-9))
+        )
+        if wick_ratio < 2.0:
+            return False
+        if action == SignalAction.BUY and rsi is not None and rsi > 40:
+            return False
+        if action == SignalAction.SELL and rsi is not None and rsi < 60:
+            return False
+        return _volume_ok(candles, index, 1.0)
+
+    if signal_name == "momentum":
+        if body < avg * 1.4:
+            return False
+        close_near_extreme = (
+            curr.close >= curr.high - rng * 0.2
+            if action == SignalAction.BUY
+            else curr.close <= curr.low + rng * 0.2
+        )
+        if not close_near_extreme:
+            return False
+        return _volume_ok(candles, index, 1.2)
+
+    if signal_name in ("three_white_soldiers", "three_black_crows"):
+        if index < 2:
+            return False
+        c1, c2, c3 = candles[index - 2], candles[index - 1], candles[index]
+        min_body = avg * 0.8
+        if min(c1.body, c2.body, c3.body) < min_body:
+            return False
+        if signal_name == "three_white_soldiers" and rsi is not None and rsi < 50:
+            return False
+        if signal_name == "three_black_crows" and rsi is not None and rsi > 50:
+            return False
+        vols = [c1.volume, c2.volume, c3.volume]
+        if all(v > 0 for v in vols) and vols[2] < vols[1] * 0.9:
+            return False
+        return True
+
+    return True
+
+
 @dataclass
 class AlexG2Strategy(Strategy):
     """
@@ -174,6 +281,8 @@ class AlexG2Strategy(Strategy):
     min_aoi_touches: int = 2
     min_bars: int = 80
     signal_cooldown: int = 8
+    filter_false_positives: bool = True
+    disabled_signals: tuple[str, ...] = ()
 
     _last_signal_index: int = field(default=-999, repr=False)
 
@@ -215,6 +324,12 @@ class AlexG2Strategy(Strategy):
             return None
 
         action, setup_kind, signal_name = entry_info
+        if signal_name in self.disabled_signals:
+            return None
+        if self.filter_false_positives and not passes_confirmation_quality_filter(
+            window, index, action, setup_kind, signal_name
+        ):
+            return None
 
         if mtf is not None and not mtf.all_filters_align(index, action):
             return None

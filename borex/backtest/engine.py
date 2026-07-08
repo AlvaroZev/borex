@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+import sys
 
 from borex.backtest.costs import TradeCosts, apply_entry_fill, apply_exit_fill, infer_pip_size
 from borex.backtest.margin_stops import (
@@ -69,6 +70,7 @@ class BacktestResult:
     avg_loss: float = 0.0
     profit_factor: float = 0.0
     avg_planned_rr: float = 0.0
+    confirmation_stats: list[dict[str, Any]] = field(default_factory=list)
 
     def summary(self) -> str:
         tf = self.timeframe
@@ -108,7 +110,57 @@ class BacktestResult:
                 f"comisión ${self.config.commission_per_trade:.2f}/trade"
             )
             lines.append(f"Comisión total pagada: ${self.total_commission:,.2f}")
+        if self.confirmation_stats:
+            lines.append("Confirmaciones (W/L/Total):")
+            for row in self.confirmation_stats:
+                lines.append(
+                    f"  - {row['signal']}: {row['wins']}/{row['losses']}/{row['total']} "
+                    f"(WR {row['win_rate']:.2%}, PnL ${row['pnl']:+,.2f})"
+                )
         return "\n".join(lines)
+
+
+def _confirmation_signal_from_pattern(pattern: str) -> str:
+    parts = pattern.split("|")
+    if not parts:
+        return "unknown"
+    if parts[0] == "alexg2" and len(parts) >= 5:
+        return parts[4]
+    if parts[0] == "alexg3" and len(parts) >= 7:
+        return parts[6]
+    return parts[-1] if parts[-1] else "unknown"
+
+
+def _build_confirmation_stats(trades: list[Trade]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, float]] = {}
+    for t in trades:
+        key = _confirmation_signal_from_pattern(t.pattern)
+        if key not in grouped:
+            grouped[key] = {"wins": 0, "losses": 0, "total": 0, "pnl": 0.0}
+        grouped[key]["total"] += 1
+        grouped[key]["pnl"] += t.pnl
+        if t.pnl > 0:
+            grouped[key]["wins"] += 1
+        else:
+            grouped[key]["losses"] += 1
+
+    out: list[dict[str, Any]] = []
+    for signal, g in grouped.items():
+        total = int(g["total"])
+        wins = int(g["wins"])
+        losses = int(g["losses"])
+        out.append(
+            {
+                "signal": signal,
+                "wins": wins,
+                "losses": losses,
+                "total": total,
+                "win_rate": (wins / total) if total else 0.0,
+                "pnl": float(g["pnl"]),
+            }
+        )
+    out.sort(key=lambda r: (r["win_rate"], r["pnl"]), reverse=True)
+    return out
 
 
 class BacktestEngine:
@@ -117,6 +169,7 @@ class BacktestEngine:
         self.config = config or BacktestConfig()
         self._costs: TradeCosts | None = None
         self._total_commission: float = 0.0
+        self._progress_every = 5
 
     def _trade_costs(self, symbol: str) -> TradeCosts:
         pip = self.config.pip_size or infer_pip_size(symbol)
@@ -154,6 +207,18 @@ class BacktestEngine:
             closed.commission = commission
             portfolio.charge_commission(commission)
             self._total_commission += commission
+        n = len(portfolio.closed_trades)
+        if n > 0 and n % self._progress_every == 0:
+            closed = portfolio.closed_trades[-1]
+            wins = sum(1 for t in portfolio.closed_trades if t.pnl > 0)
+            sign = "+" if closed.pnl >= 0 else ""
+            print(
+                f"[backtest] trades={n} | last {closed.side.value} "
+                f"PnL {sign}{closed.pnl:.2f} [{closed.exit_reason}] | "
+                f"WR {wins}/{n} ({wins / n:.1%}) | cash ${portfolio.cash:,.2f}",
+                flush=True,
+                file=sys.stderr,
+            )
 
     def run(
         self,
@@ -288,6 +353,17 @@ class BacktestEngine:
             take_profit = signal.take_profit
             rr = rr_from_winrate(portfolio.win_rate, self.config.true_sl_rr)
 
+            # Inverse flips fill side first. Mirror analysis SL/TP onto that
+            # side BEFORE margin sizing — never after (that double-flips levels).
+            if (
+                self.config.inversed
+                and stop_loss is not None
+                and take_profit is not None
+            ):
+                stop_loss, take_profit = mirror_sl_tp_for_inverse(
+                    exec_price, stop_loss, take_profit
+                )
+
             if self.config.true_sl and self.config.size_mode == "margin":
                 stop_loss, take_profit = margin_stop_out_prices(
                     exec_price,
@@ -304,15 +380,6 @@ class BacktestEngine:
                     take_profit = tp_from_sl_rr(exec_price, stop_loss, side, rr)
             elif stop_loss is not None:
                 take_profit = tp_from_sl_rr(exec_price, stop_loss, side, rr)
-
-            if (
-                self.config.inversed
-                and stop_loss is not None
-                and take_profit is not None
-            ):
-                stop_loss, take_profit = mirror_sl_tp_for_inverse(
-                    exec_price, stop_loss, take_profit
-                )
 
             portfolio.open_position(
                 action,
@@ -437,6 +504,7 @@ class BacktestEngine:
             if risk > 0:
                 planned_rrs.append(reward / risk)
         avg_planned_rr = sum(planned_rrs) / len(planned_rrs) if planned_rrs else 0.0
+        confirmation_stats = _build_confirmation_stats(trades)
 
         return BacktestResult(
             strategy_name=self.strategy.name,
@@ -458,4 +526,5 @@ class BacktestEngine:
             avg_loss=avg_loss,
             profit_factor=profit_factor,
             avg_planned_rr=avg_planned_rr,
+            confirmation_stats=confirmation_stats,
         )

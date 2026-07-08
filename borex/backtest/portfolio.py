@@ -18,6 +18,7 @@ class Trade:
     entry_price: float
     entry_time: object
     pattern: str
+    symbol: str = ""
     stop_loss: float | None = None
     take_profit: float | None = None
     score: float = 0.0
@@ -212,6 +213,7 @@ class Portfolio:
             entry_price=price,
             entry_time=timestamp,
             pattern=pattern,
+            symbol="",
             stop_loss=stop_loss,
             take_profit=take_profit,
             score=score,

@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from borex.viewer.context import ViewerSession
+from borex.viewer.context import ViewerSession, confirmation_stats
 
 _session: ViewerSession | None = None
 
@@ -43,6 +43,7 @@ def create_app(static_dir: Path) -> FastAPI:
             "total_return_pct": s.total_return_pct,
             "win_rate": s.win_rate,
             "total_trades": s.total_trades,
+            "confirmation_stats": confirmation_stats(s.trades),
             "trades": s.trade_summaries(),
         }
 

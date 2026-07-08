@@ -34,15 +34,18 @@ def tighten_sl_to_margin_stop(
     side: PositionSide,
     leverage: float,
 ) -> float:
-    """Never place SL farther than the margin wipe distance."""
+    """
+    Never place SL farther than the margin wipe distance.
+    Also rejects an SL on the wrong side of entry (e.g. long-derived SL after inverse).
+    """
     move = margin_stop_move_pct(leverage)
     if side == PositionSide.LONG:
         cap = entry * (1.0 - move)
-        if stop_loss is None:
+        if stop_loss is None or stop_loss >= entry:
             return cap
         return max(stop_loss, cap)
     cap = entry * (1.0 + move)
-    if stop_loss is None:
+    if stop_loss is None or stop_loss <= entry:
         return cap
     return min(stop_loss, cap)
 

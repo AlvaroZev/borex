@@ -67,6 +67,24 @@
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
     }
+    .confirm-stats {
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.74rem;
+      color: var(--muted);
+    }
+    .confirm-stats h3 {
+      font-size: 0.76rem;
+      color: var(--text);
+      margin-bottom: 0.35rem;
+      font-weight: 600;
+    }
+    .confirm-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      line-height: 1.45;
+    }
     .trade-list-wrap {
       flex: 1;
       min-height: 0;
@@ -174,6 +192,7 @@
   <main>
     <aside>
       <div class="aside-title" id="trade-list-title">Trades</div>
+      <div class="confirm-stats" id="confirm-stats"></div>
       <div class="trade-list-wrap">
         <ul class="trade-list" id="trade-list"></ul>
       </div>
@@ -250,14 +269,16 @@
         const meta = t.meta || {};
         const setup = [meta.trend, meta.setup, meta.aoi_kind].filter(Boolean).join(" · ");
         const sig = fmtSignalLabel(t);
+        const entryCap = Number(t.entry_cash ?? t.entry_equity ?? 0);
+        const sym = t.symbol || "";
         return `
           <li class="trade-item" data-id="${i}">
             <div class="row1">
-              <span class="side ${t.side}">#${i + 1} ${t.side}</span>
+              <span class="side ${t.side}">#${i + 1} ${t.side} ${sym ? `(${sym})` : ""}</span>
               <span class="pnl" style="color:${win ? 'var(--green)' : 'var(--red)'}">${win ? '+' : ''}$${t.pnl.toFixed(2)}</span>
             </div>
             <div class="detail"><strong style="color:var(--yellow)">${sig}</strong> · ${setup || t.pattern}</div>
-            <div class="detail">${t.exit_reason} · RR ${t.planned_rr}:1 · ${(t.leverage ?? session.leverage ?? 0).toFixed(0)}x · risk ${fmtPct(t.risk_pct ?? 0)} · acct ${fmtPct(t.account_pct ?? 0)} · margin ${fmtPct(t.margin_return_pct ?? 0)}</div>
+            <div class="detail">${t.exit_reason} · RR ${t.planned_rr}:1 · cap $${entryCap.toLocaleString(undefined,{maximumFractionDigits:2})} · ${(t.leverage ?? session.leverage ?? 0).toFixed(0)}x · risk ${fmtPct(t.risk_pct ?? 0)} · acct ${fmtPct(t.account_pct ?? 0)} · margin ${fmtPct(t.margin_return_pct ?? 0)}</div>
           </li>
         `;
       }).join("");
@@ -265,6 +286,22 @@
       list.querySelectorAll(".trade-item").forEach((el) => {
         el.addEventListener("click", () => selectTrade(Number(el.dataset.id)));
       });
+    }
+
+    function renderConfirmationStats() {
+      const box = document.getElementById("confirm-stats");
+      const stats = session.confirmation_stats || [];
+      if (!stats.length) {
+        box.innerHTML = "<h3>Confirmation Stats</h3><div>No data</div>";
+        return;
+      }
+      const rows = stats.map((s) => `
+        <div class="confirm-row">
+          <span>${s.signal.replace(/_/g, " ")}</span>
+          <span>W/L ${s.wins}/${s.losses} · ${fmtPct(s.win_rate)} · $${Number(s.pnl).toFixed(2)}</span>
+        </div>
+      `).join("");
+      box.innerHTML = `<h3>Confirmation Stats</h3>${rows}`;
     }
 
     function clearPriceLines() {
@@ -317,6 +354,7 @@
           <div>Stop loss<strong>${fmtPrice(t.stop_loss, prec)}</strong></div>
           <div>Take profit<strong>${fmtPrice(t.take_profit, prec)}</strong></div>
           <div>Planned RR<strong>${t.planned_rr}:1</strong></div>
+          <div>Capital at entry<strong>$${Number(t.entry_cash ?? t.entry_equity ?? 0).toLocaleString(undefined,{maximumFractionDigits:2})}</strong></div>
           <div>Margin<strong>$${(t.margin ?? 0).toFixed(2)}</strong></div>
           <div>Notional<strong>$${(t.notional ?? 0).toLocaleString(undefined,{maximumFractionDigits:0})} (${(t.leverage ?? session.leverage ?? 0).toFixed(0)}x)</strong></div>
           <div>PnL<strong style="color:${win ? 'var(--green)' : 'var(--red)'}">$${t.pnl.toFixed(2)} (acct ${fmtPct(t.account_pct ?? 0)}, margin ${fmtPct(t.margin_return_pct ?? 0)})</strong></div>
@@ -397,6 +435,7 @@
         session = await res.json();
         pricePrecision = detectPrecision(session.symbol);
         renderSessionMeta();
+        renderConfirmationStats();
         renderTradeList();
         if (session.trades.length) selectTrade(0);
       } catch (e) {

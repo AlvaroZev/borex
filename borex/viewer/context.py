@@ -22,14 +22,18 @@ def _ts_unix(ts: object) -> int:
 
 def _parse_alexg2_pattern(pattern: str) -> dict[str, str]:
     parts = pattern.split("|")
-    if len(parts) < 5 or parts[0] != "alexg2":
+    if len(parts) < 5 or parts[0] not in ("alexg2", "alexg3"):
         return {}
-    return {
-        "trend": parts[1],
-        "setup": parts[2],
-        "aoi_kind": parts[3],
-        "signal": parts[4],
+    out = {
+        "trend": parts[3] if parts[0] == "alexg3" else parts[1],
+        "setup": parts[4] if parts[0] == "alexg3" else parts[2],
+        "aoi_kind": parts[5] if parts[0] == "alexg3" else parts[3],
+        "signal": parts[6] if parts[0] == "alexg3" else parts[4],
     }
+    if parts[0] == "alexg3" and len(parts) > 2:
+        out["currency_bias"] = parts[2]
+        out["pair"] = parts[1]
+    return out
 
 
 def _signal_label(meta: dict[str, str]) -> str:
@@ -108,6 +112,7 @@ def trade_summary(
 
     return {
         "id": None,  # filled by caller
+        "symbol": trade.symbol,
         "side": trade.side.value,
         "pattern": trade.pattern,
         "meta": meta,
@@ -143,6 +148,38 @@ def trade_summary(
         "exit_reason": trade.exit_reason,
         "score": trade.score,
     }
+
+
+def confirmation_stats(trades: list[Trade]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, float]] = {}
+    for t in trades:
+        meta = _parse_alexg2_pattern(t.pattern)
+        signal = meta.get("signal", "unknown")
+        if signal not in grouped:
+            grouped[signal] = {"wins": 0, "losses": 0, "total": 0, "pnl": 0.0}
+        grouped[signal]["total"] += 1
+        grouped[signal]["pnl"] += t.pnl
+        if t.pnl > 0:
+            grouped[signal]["wins"] += 1
+        else:
+            grouped[signal]["losses"] += 1
+
+    out: list[dict[str, Any]] = []
+    for signal, g in grouped.items():
+        total = int(g["total"])
+        wins = int(g["wins"])
+        out.append(
+            {
+                "signal": signal,
+                "wins": wins,
+                "losses": int(g["losses"]),
+                "total": total,
+                "win_rate": (wins / total) if total else 0.0,
+                "pnl": round(float(g["pnl"]), 2),
+            }
+        )
+    out.sort(key=lambda r: (r["win_rate"], r["pnl"]), reverse=True)
+    return out
 
 
 def build_trade_chart(
@@ -283,6 +320,7 @@ class ViewerSession:
     inversed: bool = False
     tp_fraction: float = 1.0
     true_sl: bool = False
+    candles_by_symbol: dict[str, list[Candle]] | None = None
 
     def trade_summaries(self) -> list[dict[str, Any]]:
         out = []
@@ -295,12 +333,18 @@ class ViewerSession:
     def trade_chart(self, trade_id: int) -> dict[str, Any]:
         if trade_id < 0 or trade_id >= len(self.trades):
             raise IndexError(trade_id)
+        trade = self.trades[trade_id]
+        candles = self.candles
+        symbol = self.symbol
+        if self.candles_by_symbol and trade.symbol in self.candles_by_symbol:
+            candles = self.candles_by_symbol[trade.symbol]
+            symbol = trade.symbol
         return build_trade_chart(
-            self.candles,
-            self.trades[trade_id],
+            candles,
+            trade,
             trade_id,
             self.leverage,
-            self.symbol,
+            symbol,
             self.inversed,
         )
 
@@ -317,6 +361,7 @@ class ViewerSession:
             "inversed": self.inversed,
             "tp_fraction": self.tp_fraction,
             "true_sl": self.true_sl,
+            "confirmation_stats": confirmation_stats(self.trades),
             "trades": self.trade_summaries(),
         }
         return json.dumps(payload)
