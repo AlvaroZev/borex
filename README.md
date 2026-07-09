@@ -259,11 +259,43 @@ Con `-v` se listan todos los trades: dirección, patrón, entrada/salida, PnL y 
 borex/
 ├── main.py              # CLI
 ├── requirements.txt
+├── docs/
+│   ├── ALEXG3_RESULTS_HISTORY.md
+│   └── VIEWER_AND_ANALYSIS.md   # Trade viewer + /analysis UI (ver doc)
 └── borex/
     ├── models/          # Vela OHLCV y señales
     ├── patterns/        # Detección de patrones
     ├── strategy/        # Estrategias
     ├── alexg/           # AlexG Method (trend, AOI, break/retest, scoring)
     ├── backtest/        # Motor de simulación
-    └── data/            # Carga de datos y alineación MTF
+    ├── data/            # Carga de datos y alineación MTF
+    └── viewer/          # Web UI: trade viewer + market analysis
 ```
+
+## Trade viewer y análisis multi-mercado
+
+UI web para inspeccionar backtests AlexG3 y señales en todos los pares FX (Dukascopy).
+
+```powershell
+# Backtest + trade viewer + análisis multi-mercado
+python -m borex.viewer --strategy alexg3 -s "EURUSD=X" -p max -i 1h --use-cache `
+  --capital 1000 --size-mode margin --position-size 0.01 --max-positions 9999 `
+  --close-on-opposite --port 8765
+
+# Guardar análisis en CSV (evitar re-escaneo)
+python -m borex.viewer --strategy alexg3 -s "EURUSD=X" -p max -i 1h --use-cache --save-analysis
+
+# Abrir /analysis desde CSV guardado (sin backtest ni scan)
+python -m borex.viewer --strategy alexg3 --load-analysis data/analysis/alexg3_max_1h --analysis-only --port 8765
+```
+
+- **Trade viewer:** http://127.0.0.1:8765/ — lista de trades y gráfico por operación  
+- **Market analysis:** http://127.0.0.1:8765/analysis — gráficos apilados por par, señales sincronizadas en tiempo, filtros, orden de charts, export/import CSV  
+
+Documentación completa: [docs/VIEWER_AND_ANALYSIS.md](docs/VIEWER_AND_ANALYSIS.md)
+
+## Variations tracking
+
+Para mantener trazabilidad de diferencias entre variantes (`alexg`, `alexg2`, `alexg3`, `alexg4`, `alexg5`, etc.):
+
+- [docs/STRATEGY_VARIATIONS.md](docs/STRATEGY_VARIATIONS.md)

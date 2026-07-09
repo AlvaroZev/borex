@@ -6,7 +6,13 @@ from __future__ import annotations
 import argparse
 import sys
 
-from borex.alexg import AlexG2Strategy, AlexG3Strategy, AlexGMethodStrategy
+from borex.alexg import (
+    AlexG2Strategy,
+    AlexG3Strategy,
+    AlexG4Strategy,
+    AlexG5Strategy,
+    AlexGMethodStrategy,
+)
 from borex.alexg.multi_market import default_forex_universe, pick_master_symbol
 from borex.backtest import BacktestConfig, BacktestEngine, MultiMarketEngine
 from borex.institutional import InstitutionalFlowStrategy
@@ -42,9 +48,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "alexg2", "alexg3", "institutional"],
+        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "institutional"],
         default="candles",
-        help="Estrategia: candles, alexg, alexg2, alexg3 o institutional",
+        help="Estrategia: candles, alexg, alexg2, alexg3, alexg4, alexg5 o institutional",
     )
     parser.add_argument(
         "--symbol", "-s", default="EURUSD=X", help="Símbolo principal (yfinance)"
@@ -138,6 +144,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=3.0,
         help="AlexG: risk/reward mínimo (ej. 3 = TP/SL 3:1)",
+    )
+    parser.add_argument(
+        "--rr-factor",
+        type=float,
+        default=1.0,
+        help="AlexG5: multiplica el RR dinámico (1/winrate). Ej. 1.1 = TP 10%% más lejos",
     )
     parser.add_argument(
         "--tp-fraction",
@@ -283,6 +295,26 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             filter_false_positives=not args.allow_false_positives,
             disabled_signals=disabled,
         )
+    if args.strategy == "alexg4":
+        return AlexG4Strategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+        )
+    if args.strategy == "alexg5":
+        return AlexG5Strategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+        )
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
             min_score=args.min_score,
@@ -310,8 +342,14 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         position_size_pct=args.position_size,
         true_sl=args.true_sl,
         true_sl_rr=args.min_rr,
+        rr_factor=args.rr_factor,
     )
-    if args.strategy in ("alexg", "alexg2", "alexg3", "institutional"):
+    if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "institutional"):
+        if args.strategy == "alexg5":
+            # AlexG5 always uses margin stop as SL and winrate-derived RR for TP.
+            base["size_mode"] = "margin"
+            base["true_sl"] = True
+            base["rr_factor"] = args.rr_factor
         return BacktestConfig(
             **base,
             stop_loss_pct=None,
@@ -381,7 +419,7 @@ def main() -> int:
     args = parse_args()
     use_mtf = args.mtf or args.strategy in ("alexg", "alexg2", "institutional")
 
-    if args.strategy == "alexg3":
+    if args.strategy in ("alexg3", "alexg4", "alexg5"):
         return _run_alexg3(args)
 
     mtf = None
@@ -418,7 +456,7 @@ def main() -> int:
 
     min_bars = (
         80
-        if args.strategy in ("alexg", "alexg2", "alexg3")
+        if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5")
         else 60
         if args.strategy == "institutional"
         else 20

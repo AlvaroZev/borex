@@ -5,15 +5,28 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from borex.alexg import AlexG2Strategy, AlexG3Strategy, AlexGMethodStrategy
+from borex.alexg import (
+    AlexG2Strategy,
+    AlexG3Strategy,
+    AlexG4Strategy,
+    AlexG5Strategy,
+    AlexGMethodStrategy,
+)
 from borex.alexg.multi_market import default_forex_universe, pick_master_symbol
 from borex.backtest import BacktestConfig, BacktestEngine, MultiMarketEngine
 from borex.data import build_full_mtf_context, load_csv, load_market_data
 from borex.institutional import InstitutionalFlowStrategy
 from borex.strategy import CandlePatternStrategy
 from borex.strategy.base import Strategy
+from borex.viewer.analysis import MarketAnalysis, scan_alexg3_decisions
+from borex.viewer.analysis_store import (
+    load_analysis_bundle,
+    resolve_run_dir,
+    save_analysis_bundle,
+)
 from borex.viewer.context import ViewerSession
 from borex.viewer.server import create_app, set_session
+from borex.viewer.trade_store import TRADES_FILE, save_trades_csv
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -38,7 +51,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "alexg2", "alexg3", "institutional"],
+        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "institutional"],
         default="alexg2",
     )
     parser.add_argument("--symbol", "-s", default="EURUSD=X")
@@ -49,6 +62,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--leverage", "-l", type=_parse_leverage, default=500.0)
     parser.add_argument("--min-score", type=float, default=70.0)
     parser.add_argument("--min-rr", type=float, default=2.0)
+    parser.add_argument(
+        "--rr-factor",
+        type=float,
+        default=1.0,
+        help="AlexG5: multiply dynamic RR (1/winrate). E.g. 1.1 = 10%% wider TP",
+    )
     parser.add_argument(
         "--tp-fraction",
         type=float,
@@ -108,6 +127,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument(
+        "--save-analysis",
+        metavar="DIR",
+        nargs="?",
+        const="",
+        help="Save analysis CSV bundle (decisions, candles, AOI). "
+        "Default: data/runs/{strategy}_{period}_{interval}/",
+    )
+    parser.add_argument(
+        "--save-trades",
+        metavar="DIR",
+        nargs="?",
+        const="",
+        help="Save backtest trades CSV. Uses same folder as --save-analysis when both set. "
+        "Default: data/runs/{strategy}_{period}_{interval}/trades.csv",
+    )
+    parser.add_argument(
+        "--load-analysis",
+        metavar="DIR",
+        help="Load analysis from saved CSV bundle (skip signal scan)",
+    )
+    parser.add_argument(
+        "--analysis-only",
+        action="store_true",
+        help="With --load-analysis: skip backtest, serve /analysis only",
+    )
     return parser.parse_args(argv)
 
 
@@ -144,6 +189,26 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             filter_false_positives=not args.allow_false_positives,
             disabled_signals=disabled,
         )
+    if args.strategy == "alexg4":
+        return AlexG4Strategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+        )
+    if args.strategy == "alexg5":
+        return AlexG5Strategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+        )
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
             min_score=args.min_score,
@@ -164,8 +229,14 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         position_size_pct=args.position_size,
         true_sl=args.true_sl,
         true_sl_rr=args.min_rr,
+        rr_factor=args.rr_factor,
     )
-    if args.strategy in ("alexg", "alexg2", "alexg3", "institutional"):
+    if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "institutional"):
+        if args.strategy == "alexg5":
+            # AlexG5 always uses margin stop as SL and winrate-derived RR for TP.
+            base["size_mode"] = "margin"
+            base["true_sl"] = True
+            base["rr_factor"] = args.rr_factor
         return BacktestConfig(**base, stop_loss_pct=None, take_profit_pct=None)
     return BacktestConfig(**base)
 
@@ -173,7 +244,36 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
 def run_session(args: argparse.Namespace) -> ViewerSession:
     cache_mode = _cache_mode(args)
 
-    if args.strategy == "alexg3":
+    if args.strategy in ("alexg3", "alexg4", "alexg5"):
+        load_path = Path(args.load_analysis) if args.load_analysis else None
+        if args.analysis_only and not load_path:
+            raise RuntimeError("--analysis-only requires --load-analysis DIR")
+
+        if args.analysis_only and load_path:
+            analysis = load_analysis_bundle(load_path)
+            tf = analysis.timeframe or args.interval
+            return ViewerSession(
+                symbol=f"analysis ({len(analysis.symbols)} pairs)",
+                timeframe=tf,
+                strategy_name=args.strategy,
+                leverage=args.leverage,
+                candles=[],
+                trades=[],
+                candles_by_symbol=None,
+                analysis=analysis,
+                summary_text=(
+                    f"Loaded analysis from {load_path}\n"
+                    f"Signals: {analysis.total_decisions} across "
+                    f"{len(analysis.symbols)} markets"
+                ),
+                total_return_pct=0.0,
+                win_rate=0.0,
+                total_trades=0,
+                inversed=args.inversed,
+                tp_fraction=args.tp_fraction,
+                true_sl=args.true_sl,
+            )
+
         universe = args.symbols if args.symbols else default_forex_universe()
         if args.symbol not in universe:
             universe = [args.symbol] + list(universe)
@@ -188,10 +288,75 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
         master = pick_master_symbol(candles_by_symbol, args.symbol)
         strategy = _build_strategy(args)
         config = _build_config(args)
+
+        analysis: MarketAnalysis | None = None
+        if load_path:
+            print(f"Loading analysis from {load_path}…", flush=True, file=sys.stderr)
+            analysis = load_analysis_bundle(load_path, candles_by_symbol)
+            print(
+                f"Loaded {analysis.total_decisions} signals (scan skipped)",
+                flush=True,
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Scanning AlexG3 decisions across all markets…",
+                flush=True,
+                file=sys.stderr,
+            )
+            analysis = scan_alexg3_decisions(
+                candles_by_symbol, strategy, master_symbol=master
+            )
+            print(
+                f"Analysis: {analysis.total_decisions} signals across "
+                f"{len(analysis.symbols)} markets",
+                flush=True,
+                file=sys.stderr,
+            )
+
+        if args.save_analysis is not None:
+            run_dir = resolve_run_dir(
+                strategy=strategy.name,
+                period=args.period,
+                interval=args.interval,
+                save_analysis=args.save_analysis,
+                save_trades=args.save_trades,
+            )
+            saved = save_analysis_bundle(
+                analysis,
+                run_dir,
+                timeframe=args.interval,
+                strategy_name=strategy.name,
+                extra_meta={
+                    "period": args.period,
+                    "trades_file": TRADES_FILE if args.save_trades is not None else None,
+                },
+            )
+            print(f"Analysis saved to {saved}", flush=True, file=sys.stderr)
+
         engine = MultiMarketEngine(strategy, config, max_positions=args.max_positions)
         result = engine.run(
             candles_by_symbol, timeframe=args.interval, master_symbol=master
         )
+
+        if args.save_trades is not None:
+            run_dir = resolve_run_dir(
+                strategy=strategy.name,
+                period=args.period,
+                interval=args.interval,
+                save_analysis=args.save_analysis,
+                save_trades=args.save_trades,
+            )
+            trades_path = save_trades_csv(
+                result.trades,
+                run_dir,
+                leverage=args.leverage,
+            )
+            print(
+                f"Trades saved to {trades_path} ({len(result.trades)} rows)",
+                flush=True,
+                file=sys.stderr,
+            )
         display_symbol = args.symbol if args.symbol in candles_by_symbol else master
         return ViewerSession(
             symbol=f"{display_symbol} (+{len(candles_by_symbol)-1} pairs)",
@@ -201,6 +366,7 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
             candles=candles_by_symbol.get(display_symbol, candles_by_symbol[master]),
             trades=result.trades,
             candles_by_symbol=candles_by_symbol,
+            analysis=analysis,
             summary_text=result.summary(),
             total_return_pct=result.total_return_pct,
             win_rate=result.win_rate,
@@ -239,6 +405,25 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
     engine = BacktestEngine(strategy, config)
     result = engine.run(candles, symbol=symbol, timeframe=timeframe, mtf=mtf)
 
+    if args.save_trades is not None:
+        run_dir = resolve_run_dir(
+            strategy=strategy.name,
+            period=args.period,
+            interval=args.interval,
+            save_analysis=None,
+            save_trades=args.save_trades,
+        )
+        trades_path = save_trades_csv(
+            result.trades,
+            run_dir,
+            leverage=args.leverage,
+        )
+        print(
+            f"Trades saved to {trades_path} ({len(result.trades)} rows)",
+            flush=True,
+            file=sys.stderr,
+        )
+
     return ViewerSession(
         symbol=symbol,
         timeframe=timeframe,
@@ -271,10 +456,12 @@ def main(argv: list[str] | None = None) -> int:
     print(session.summary_text, flush=True)
     print(flush=True)
     print(f"Trade viewer: {url}", flush=True)
+    print(f"Market analysis: {url}/analysis", flush=True)
     print(f"Trades to inspect: {session.total_trades}", flush=True)
 
     if not args.no_browser:
-        webbrowser.open(url)
+        open_url = f"{url}/analysis" if args.analysis_only else url
+        webbrowser.open(open_url)
 
     import uvicorn
 

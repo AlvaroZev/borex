@@ -156,8 +156,8 @@
       overflow: hidden;
     }
     #chart {
-      height: 340px;
-      max-height: 38vh;
+      height: 680px;
+      max-height: 76vh;
       flex-shrink: 0;
       width: 100%;
     }
@@ -188,6 +188,7 @@
   <header>
     <h1>Borex Trade Viewer</h1>
     <div class="meta" id="session-meta">Loading…</div>
+    <a href="/analysis" style="color:var(--accent);font-size:0.85rem;text-decoration:none;">Market Analysis →</a>
   </header>
   <main>
     <aside>
@@ -365,7 +366,7 @@
       `;
 
       const container = document.getElementById("chart");
-      const chartHeight = Math.min(340, Math.max(260, Math.floor(window.innerHeight * 0.38)));
+      const chartHeight = Math.min(680, Math.max(520, Math.floor(window.innerHeight * 0.76)));
       container.style.height = chartHeight + "px";
 
       chart = LightweightCharts.createChart(container, {
@@ -411,7 +412,7 @@
 
       chart.timeScale().fitContent();
       const ro = new ResizeObserver(() => {
-        const h = Math.min(340, Math.max(260, Math.floor(window.innerHeight * 0.38)));
+        const h = Math.min(680, Math.max(520, Math.floor(window.innerHeight * 0.76)));
         container.style.height = h + "px";
         chart.applyOptions({ width: container.clientWidth, height: h });
       });

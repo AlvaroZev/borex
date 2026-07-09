@@ -29,6 +29,10 @@ def create_app(static_dir: Path) -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(static_dir / "index.html")
 
+    @app.get("/analysis")
+    def analysis_page() -> FileResponse:
+        return FileResponse(static_dir / "analysis.html")
+
     @app.get("/api/session")
     def api_session():
         s = get_session()
@@ -54,6 +58,50 @@ def create_app(static_dir: Path) -> FastAPI:
             return s.trade_chart(trade_id)
         except IndexError:
             raise HTTPException(status_code=404, detail="Trade not found") from None
+
+    @app.get("/api/analysis/overview")
+    def api_analysis_overview():
+        s = get_session()
+        if s.analysis is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Analysis available only for AlexG3/AlexG4/AlexG5 multi-market sessions",
+            )
+        payload = s.analysis.overview()
+        payload["strategy"] = s.strategy_name
+        payload["timeframe"] = s.timeframe
+        payload["summary"] = s.summary_text
+        return payload
+
+    @app.get("/api/analysis/markets")
+    def api_analysis_markets(show_aoi: bool = True):
+        s = get_session()
+        if s.analysis is None or not s.candles_by_symbol:
+            raise HTTPException(
+                status_code=404,
+                detail="Analysis available only for AlexG3/AlexG4/AlexG5 multi-market sessions",
+            )
+        markets = []
+        for sym in s.analysis.symbols:
+            candles = (s.candles_by_symbol or {}).get(sym)
+            markets.append(
+                s.analysis.market_chart(sym, candles, show_aoi=show_aoi)
+            )
+        return {
+            "symbols": s.analysis.symbols,
+            "master_symbol": s.analysis.master_symbol,
+            "timeline_start": (
+                s.analysis.master_timeline_unix[0]
+                if s.analysis.master_timeline_unix
+                else None
+            ),
+            "timeline_end": (
+                s.analysis.master_timeline_unix[-1]
+                if s.analysis.master_timeline_unix
+                else None
+            ),
+            "markets": markets,
+        }
 
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=static_dir), name="static")

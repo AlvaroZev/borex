@@ -198,3 +198,9 @@ Used `-p 90d` for speed (~1.5k bars). Many runs landed near **~100 trades** beca
    - headline metrics table row
    - exact PowerShell command
    - optional confirmation / notes (bugs fixed, filters, etc.)
+
+---
+
+## Viewer and multi-market analysis UI
+
+For the trade viewer (`/`), market analysis page (`/analysis`), time-synced charts, CSV save/load, and CLI flags (`--save-analysis`, `--load-analysis`, `--analysis-only`), see **[VIEWER_AND_ANALYSIS.md](./VIEWER_AND_ANALYSIS.md)**.

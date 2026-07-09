@@ -65,7 +65,7 @@ class AlexG3Strategy(Strategy):
         self._current_symbol = symbol
         self._market_ctx = market_ctx
 
-    def on_bar(
+    def _evaluate_setup(
         self,
         index: int,
         candles: list[Candle],
@@ -74,10 +74,6 @@ class AlexG3Strategy(Strategy):
         symbol = self._current_symbol or "UNKNOWN"
 
         if index < self.min_bars:
-            return None
-
-        last = self._last_signal_index.get(symbol, -999)
-        if index - last < self.signal_cooldown:
             return None
 
         window = candles[: index + 1]
@@ -143,13 +139,11 @@ class AlexG3Strategy(Strategy):
             return None
         sl, tp = stops
 
-        self._last_signal_index[symbol] = index
-
         strong = ctx.strongest if ctx else "-"
         weak = ctx.weakest if ctx else "-"
         strength_tag = ctx.strength_summary() if ctx else "na"
         pattern = (
-            f"alexg3|{base}{quote}|{strong}>{weak}|{trend.value}|"
+            f"{self.name}|{base}{quote}|{strong}>{weak}|{trend.value}|"
             f"{setup_kind}|{aoi.kind}|{signal_name}|{strength_tag}"
         )
 
@@ -163,3 +157,25 @@ class AlexG3Strategy(Strategy):
             take_profit=tp,
             score=self.min_rr,
         )
+
+    def on_bar(
+        self,
+        index: int,
+        candles: list[Candle],
+        mtf: MultiTimeframeContext | None = None,
+    ) -> Signal | None:
+        symbol = self._current_symbol or "UNKNOWN"
+
+        if index < self.min_bars:
+            return None
+
+        last = self._last_signal_index.get(symbol, -999)
+        if index - last < self.signal_cooldown:
+            return None
+
+        signal = self._evaluate_setup(index, candles, mtf)
+        if signal is None:
+            return None
+
+        self._last_signal_index[symbol] = index
+        return signal

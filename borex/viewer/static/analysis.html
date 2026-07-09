@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Borex Market Analysis — AlexG3</title>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --green: #22c55e;
+      --red: #ef4444;
+      --accent: #3b82f6;
+      --yellow: #fbbf24;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { min-height: 100%; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    header {
+      padding: 0.85rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.25rem;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    header h1 { font-size: 1.05rem; font-weight: 600; }
+    .nav-links { display: flex; gap: 1rem; font-size: 0.85rem; }
+    .nav-links a { color: var(--accent); text-decoration: none; }
+    .nav-links a:hover { text-decoration: underline; }
+    .meta { display: flex; flex-wrap: wrap; gap: 0.65rem; font-size: 0.82rem; color: var(--muted); }
+    .meta strong { color: var(--text); }
+    .layout {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      align-items: stretch;
+    }
+    aside {
+      width: 280px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .aside-block {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .aside-block h2 {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .control-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.82rem;
+      margin-bottom: 0.45rem;
+    }
+    .control-row:last-child { margin-bottom: 0; }
+    label.toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      cursor: pointer;
+      user-select: none;
+    }
+    select, input[type="search"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 4px;
+      padding: 0.35rem 0.5rem;
+      font-size: 0.82rem;
+    }
+    .symbol-list {
+      list-style: none;
+      flex: 1;
+      overflow-y: auto;
+      min-height: 0;
+    }
+    .symbol-item {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.55rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      cursor: grab;
+      font-size: 0.82rem;
+    }
+    .symbol-item:active { cursor: grabbing; }
+    .symbol-item.drag-over { background: rgba(59,130,246,0.15); }
+    .symbol-item .handle { color: var(--muted); font-size: 0.9rem; flex-shrink: 0; }
+    .symbol-item .sym { flex: 1; font-weight: 600; }
+    .symbol-item .count { color: var(--muted); font-size: 0.75rem; }
+    .symbol-item .order-btns {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      flex-shrink: 0;
+    }
+    .symbol-item .order-btns button {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      width: 22px;
+      height: 18px;
+      font-size: 0.65rem;
+      cursor: pointer;
+      border-radius: 2px;
+      line-height: 1;
+    }
+    .symbol-item .order-btns button:hover { color: var(--text); border-color: var(--accent); }
+    main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .charts-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .market-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .market-header {
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1rem;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .market-header h3 { font-size: 0.95rem; font-weight: 600; }
+    .market-meta { font-size: 0.75rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 0.65rem; }
+    .market-meta .bull { color: var(--green); }
+    .market-meta .bear { color: var(--red); }
+    .chart-box {
+      width: 100%;
+      height: clamp(220px, 32vh, 420px);
+      min-height: 220px;
+    }
+    .decisions-wrap {
+      border-top: 1px solid var(--border);
+      max-height: 280px;
+      overflow: auto;
+    }
+    .decisions-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.76rem;
+    }
+    .decisions-table th,
+    .decisions-table td {
+      padding: 0.45rem 0.65rem;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+    .decisions-table th {
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+      color: var(--muted);
+      font-weight: 600;
+      z-index: 1;
+    }
+    .decisions-table tr:hover td { background: rgba(59,130,246,0.06); }
+    .decisions-table tr.clickable { cursor: pointer; }
+    .decisions-table tr.active-row td { background: rgba(251, 191, 36, 0.12); }
+    .decisions-table tr.flash-row td {
+      animation: flashRow 0.9s ease;
+    }
+    @keyframes flashRow {
+      0%, 100% { background: transparent; }
+      25%, 75% { background: rgba(251, 191, 36, 0.28); }
+    }
+    .market-panel.flash-panel {
+      box-shadow: 0 0 0 2px var(--yellow);
+      transition: box-shadow 0.15s ease;
+    }
+    .sync-hint {
+      font-size: 0.72rem;
+      color: var(--muted);
+      padding: 0.35rem 1rem 0;
+    }
+    .sync-hint strong { color: var(--yellow); }
+    .decisions-table .buy { color: var(--green); font-weight: 600; }
+    .decisions-table .sell { color: var(--red); font-weight: 600; }
+    .tag {
+      display: inline-block;
+      background: rgba(139,156,179,0.15);
+      color: var(--muted);
+      padding: 0.1rem 0.35rem;
+      border-radius: 3px;
+      font-size: 0.7rem;
+      text-transform: capitalize;
+      margin-right: 0.2rem;
+    }
+    .legend {
+      padding: 0.45rem 1rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+    .legend i {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+    .log-section {
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+      flex-shrink: 0;
+      max-height: 240px;
+      overflow: auto;
+    }
+    .log-section h2 {
+      padding: 0.55rem 1rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+      z-index: 2;
+    }
+    .empty, .loading, .error {
+      padding: 2rem;
+      text-align: center;
+      color: var(--muted);
+    }
+    .error { color: var(--red); }
+
+    @media (max-width: 900px) {
+      .layout { flex-direction: column; }
+      aside {
+        width: 100%;
+        max-height: none;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+      }
+      .symbol-list {
+        max-height: 180px;
+        flex: none;
+      }
+      .chart-box {
+        height: clamp(200px, 40vw, 320px);
+      }
+    }
+
+    @media (max-width: 560px) {
+      header { flex-direction: column; align-items: flex-start; }
+      .decisions-table { font-size: 0.7rem; }
+      .decisions-table th:nth-child(4),
+      .decisions-table td:nth-child(4),
+      .decisions-table th:nth-child(7),
+      .decisions-table td:nth-child(7) {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>AlexG3 Market Analysis</h1>
+      <div class="nav-links">
+        <a href="/">← Trade Viewer</a>
+      </div>
+    </div>
+    <div class="meta" id="session-meta">Loading…</div>
+  </header>
+
+  <div class="layout">
+    <aside>
+      <div class="aside-block">
+        <h2>Display</h2>
+        <div class="control-row">
+          <label class="toggle">
+            <input type="checkbox" id="sync-time" checked />
+            Sync time across charts
+          </label>
+        </div>
+        <div class="control-row">
+          <label class="toggle">
+            <input type="checkbox" id="show-aoi" checked />
+            Show AOI levels
+          </label>
+        </div>
+        <div class="control-row">
+          <label for="filter-trend">Trend</label>
+        </div>
+        <select id="filter-trend">
+          <option value="">All trends</option>
+          <option value="bullish">Bullish</option>
+          <option value="bearish">Bearish</option>
+        </select>
+        <div class="control-row" style="margin-top:0.5rem">
+          <label for="filter-signal">Confirmation</label>
+        </div>
+        <select id="filter-signal">
+          <option value="">All confirmations</option>
+        </select>
+        <div class="control-row" style="margin-top:0.5rem">
+          <label for="filter-symbol">Market</label>
+        </div>
+        <select id="filter-symbol">
+          <option value="">All markets</option>
+        </select>
+      </div>
+      <div class="aside-block" style="padding-bottom:0.35rem">
+        <h2>Chart order (drag or ↑↓)</h2>
+      </div>
+      <ul class="symbol-list" id="symbol-order"></ul>
+    </aside>
+
+    <main>
+      <div class="sync-hint" id="sync-hint"></div>
+      <div class="charts-scroll" id="charts-container">
+        <div class="loading">Loading market analysis…</div>
+      </div>
+      <div class="log-section">
+        <h2 id="log-title">All decisions</h2>
+        <table class="decisions-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Trend</th>
+              <th>Setup</th>
+              <th>AOI</th>
+              <th>Confirmation</th>
+              <th>Strength</th>
+            </tr>
+          </thead>
+          <tbody id="decisions-log"></tbody>
+        </table>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    let overview = null;
+    let marketsBySymbol = {};
+    let symbolOrder = [];
+    let chartInstances = {};
+    let showAoi = true;
+    let timeSyncEnabled = true;
+    let syncLock = false;
+    let crosshairLock = false;
+    let timelineStart = null;
+    let timelineEnd = null;
+    let dragSrc = null;
+
+    function chartPanOptions() {
+      return {
+        handleScroll: {
+          mouseWheel: true,
+          pressedMouseMove: true,
+          horzTouchDrag: true,
+          vertTouchDrag: false,
+        },
+        handleScale: {
+          axisPressedMouseMove: { time: true, price: true },
+          axisDoubleClickReset: true,
+          mouseWheel: false,
+          pinch: false,
+        },
+      };
+    }
+
+    function detectPrecision(symbol) {
+      return (symbol || "").toUpperCase().includes("JPY") ? 3 : 5;
+    }
+
+    function fmtPrice(p, symbol) {
+      if (p == null) return "—";
+      return Number(p).toFixed(detectPrecision(symbol));
+    }
+
+    function fmtDate(value) {
+      if (!value) return "—";
+      const dt = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(dt.getTime())) return "—";
+      const dd = String(dt.getDate()).padStart(2, "0");
+      const mm = String(dt.getMonth() + 1).padStart(2, "0");
+      const yy = String(dt.getFullYear()).slice(-2);
+      const hh = String(dt.getHours()).padStart(2, "0");
+      const mi = String(dt.getMinutes()).padStart(2, "0");
+      return `${dd}/${mm}/${yy} ${hh}:${mi}`;
+    }
+
+    function fmtTime(iso) {
+      return fmtDate(iso);
+    }
+
+    function sortDecisionsAsc(decisions) {
+      return [...decisions].sort(
+        (a, b) => a.time_unix - b.time_unix || a.symbol.localeCompare(b.symbol)
+      );
+    }
+
+    function decisionMarker(d, highlight = false) {
+      const isBuy = d.action === "buy";
+      const color = isBuy ? "#22c55e" : "#ef4444";
+      const label = (d.signal_label || d.signal || (isBuy ? "Buy" : "Sell"))
+        .replace(/_/g, " ")
+        .slice(0, 24);
+      return {
+        time: d.time_unix,
+        position: isBuy ? "belowBar" : "aboveBar",
+        color: highlight ? "#fbbf24" : color,
+        shape: isBuy ? "arrowUp" : "arrowDown",
+        text: label,
+        size: highlight ? 2 : 1,
+      };
+    }
+
+    function markersForDecisions(decisions, highlightTime = null) {
+      return decisions.map((d) =>
+        decisionMarker(d, highlightTime !== null && d.time_unix === highlightTime)
+      );
+    }
+
+    function flashDecision(symbol, time) {
+      const inst = chartInstances[symbol];
+      const data = marketsBySymbol[symbol];
+      if (!inst || !data) return;
+
+      const decisions = sortDecisionsAsc(filteredDecisions(data.decisions));
+      inst.series.setMarkers(markersForDecisions(decisions, time));
+
+      const panel = document.querySelector(`.market-panel[data-symbol="${symbol}"]`);
+      if (panel) {
+        panel.classList.remove("flash-panel");
+        void panel.offsetWidth;
+        panel.classList.add("flash-panel");
+        setTimeout(() => panel.classList.remove("flash-panel"), 900);
+      }
+
+      document.querySelectorAll(
+        `tr[data-symbol="${symbol}"][data-time="${time}"]`
+      ).forEach((row) => {
+        row.classList.remove("flash-row");
+        void row.offsetWidth;
+        row.classList.add("flash-row");
+        setTimeout(() => row.classList.remove("flash-row"), 900);
+      });
+
+      setTimeout(() => {
+        if (chartInstances[symbol]) {
+          inst.series.setMarkers(markersForDecisions(decisions));
+        }
+      }, 1000);
+    }
+
+    function symLabel(sym) {
+      return sym.replace("=X", "");
+    }
+
+    function renderMeta() {
+      const el = document.getElementById("session-meta");
+      el.innerHTML = `
+        <span><strong>${overview.strategy}</strong> · ${overview.timeframe}</span>
+        <span>Markets <strong>${overview.symbols.length}</strong></span>
+        <span>Signals <strong>${overview.total_decisions}</strong></span>
+        <span>Master <strong>${symLabel(overview.master_symbol)}</strong></span>
+        <span>Timeline <strong>${(overview.timeline_bar_count || overview.master_timeline_unix?.length || 0).toLocaleString()} bars</strong></span>
+        ${overview.from_cache ? '<span class="badge" style="background:rgba(34,197,94,0.15);color:var(--green)">Loaded from CSV</span>' : ''}
+      `;
+      const hint = document.getElementById("sync-hint");
+      if (overview.timeline_start && overview.timeline_end) {
+        timelineStart = overview.timeline_start;
+        timelineEnd = overview.timeline_end;
+        const cacheNote = overview.from_cache
+          ? ` Saved bundle${overview.saved_at ? ` (${overview.saved_at})` : ""}.`
+          : "";
+        hint.innerHTML = `
+          Charts aligned to <strong>${symLabel(overview.master_symbol)}</strong> master timeline
+          (${fmtTime(new Date(overview.timeline_start * 1000).toISOString())}
+          → ${fmtTime(new Date(overview.timeline_end * 1000).toISOString())}).${cacheNote}
+          Zoom/pan sync across markets — vertical crosshair follows the chart you hover. Click a decision row to jump all charts.
+        `;
+      } else {
+        hint.textContent = "";
+      }
+    }
+
+    function uniqueSignals(decisions) {
+      const set = new Set();
+      decisions.forEach((d) => { if (d.signal) set.add(d.signal); });
+      return [...set].sort();
+    }
+
+    function populateFilters() {
+      const sigSel = document.getElementById("filter-signal");
+      const symSel = document.getElementById("filter-symbol");
+      const signals = uniqueSignals(overview.decisions);
+      sigSel.innerHTML = '<option value="">All confirmations</option>' +
+        signals.map((s) => `<option value="${s}">${s.replace(/_/g, " ")}</option>`).join("");
+      symSel.innerHTML = '<option value="">All markets</option>' +
+        symbolOrder.map((s) => `<option value="${s}">${symLabel(s)}</option>`).join("");
+    }
+
+    function filteredDecisions(decisions) {
+      const trend = document.getElementById("filter-trend").value;
+      const signal = document.getElementById("filter-signal").value;
+      const symbol = document.getElementById("filter-symbol").value;
+      return decisions.filter((d) => {
+        if (trend && d.trend !== trend) return false;
+        if (signal && d.signal !== signal) return false;
+        if (symbol && d.symbol !== symbol) return false;
+        return true;
+      });
+    }
+
+    function renderDecisionsLog() {
+      const rows = sortDecisionsAsc(filteredDecisions(overview.decisions));
+      document.getElementById("log-title").textContent =
+        `All decisions (${rows.length}${rows.length !== overview.decisions.length ? ` / ${overview.decisions.length}` : ""})`;
+      const tbody = document.getElementById("decisions-log");
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted)">No decisions match filters</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((d) => `
+        <tr class="clickable" data-symbol="${d.symbol}" data-time="${d.time_unix}">
+          <td>${fmtTime(d.time)}</td>
+          <td>${symLabel(d.symbol)}</td>
+          <td class="${d.action}">${d.action.toUpperCase()}</td>
+          <td><span class="tag">${d.trend || "—"}</span></td>
+          <td><span class="tag">${d.setup || "—"}</span></td>
+          <td><span class="tag">${d.aoi_kind || "—"}</span></td>
+          <td>${d.signal_label || d.signal || "—"}</td>
+          <td style="font-size:0.68rem;color:var(--muted)">${(d.strength || "").slice(0, 48)}</td>
+        </tr>
+      `).join("");
+      tbody.querySelectorAll("tr.clickable").forEach((row) => {
+        row.addEventListener("click", () => {
+          const t = Number(row.dataset.time);
+          const sym = row.dataset.symbol;
+          if (t) jumpToTime(t, row, sym);
+        });
+      });
+    }
+
+    function priceAtTime(candles, time) {
+      if (!candles || !time) return 0;
+      let lo = 0;
+      let hi = candles.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const bar = candles[mid];
+        if (bar.time === time) return bar.close;
+        if (bar.time < time) lo = mid + 1;
+        else hi = mid - 1;
+      }
+      const nearest = candles[Math.max(0, Math.min(candles.length - 1, lo))];
+      return nearest ? nearest.close : 0;
+    }
+
+    function setAllVisibleRange(range, sourceChart) {
+      if (!timeSyncEnabled || syncLock || !range) return;
+      syncLock = true;
+      Object.values(chartInstances).forEach(({ chart }) => {
+        if (chart !== sourceChart) {
+          chart.timeScale().setVisibleRange(range);
+        }
+      });
+      syncLock = false;
+    }
+
+    function syncCrosshairFrom(param, sourceChart) {
+      if (!timeSyncEnabled || crosshairLock) return;
+
+      crosshairLock = true;
+      try {
+        const time = param.time;
+        if (time === undefined) {
+          Object.values(chartInstances).forEach(({ chart }) => {
+            chart.clearCrosshairPosition();
+          });
+          return;
+        }
+
+        Object.values(chartInstances).forEach(({ chart, series, candles }) => {
+          if (chart === sourceChart) return;
+          chart.setCrosshairPosition(priceAtTime(candles, time), time, series);
+        });
+      } finally {
+        crosshairLock = false;
+      }
+    }
+
+    function setupChartSync(visible) {
+      if (!visible.length) return;
+
+      const first = chartInstances[visible[0]];
+      if (first) {
+        first.chart.timeScale().fitContent();
+        const range = first.chart.timeScale().getVisibleRange();
+        setAllVisibleRange(range, null);
+      }
+
+      Object.values(chartInstances).forEach(({ chart }) => {
+        chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
+          setAllVisibleRange(range, chart);
+        });
+        chart.subscribeCrosshairMove((param) => {
+          syncCrosshairFrom(param, chart);
+        });
+      });
+    }
+
+    function jumpToTime(time, rowEl, symbol) {
+      if (!time) return;
+      document.querySelectorAll("#decisions-log tr.active-row").forEach((r) => {
+        r.classList.remove("active-row");
+      });
+      if (rowEl) rowEl.classList.add("active-row");
+
+      const span = Math.max(3600 * 24 * 14, (timelineEnd - timelineStart) * 0.02);
+      const from = Math.max(timelineStart || time - span, time - span);
+      const to = Math.min(timelineEnd || time + span, time + span);
+      const range = { from, to };
+
+      syncLock = true;
+      crosshairLock = true;
+      Object.values(chartInstances).forEach(({ chart, series, candles }) => {
+        chart.timeScale().setVisibleRange(range);
+        chart.setCrosshairPosition(priceAtTime(candles, time), time, series);
+      });
+      crosshairLock = false;
+      syncLock = false;
+
+      const sym = symbol || rowEl?.dataset?.symbol;
+      if (sym) {
+        flashDecision(sym, time);
+        const panel = document.querySelector(`.market-panel[data-symbol="${sym}"]`);
+        if (panel) panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    }
+
+    function moveSymbol(index, delta) {
+      const next = index + delta;
+      if (next < 0 || next >= symbolOrder.length) return;
+      const copy = [...symbolOrder];
+      const [item] = copy.splice(index, 1);
+      copy.splice(next, 0, item);
+      symbolOrder = copy;
+      renderSymbolOrder();
+      renderCharts();
+    }
+
+    function renderSymbolOrder() {
+      const list = document.getElementById("symbol-order");
+      list.innerHTML = symbolOrder.map((sym, i) => {
+        const count = overview.decision_counts[sym] || 0;
+        return `
+          <li class="symbol-item" draggable="true" data-index="${i}" data-symbol="${sym}">
+            <span class="handle">⠿</span>
+            <span class="sym">${symLabel(sym)}</span>
+            <span class="count">${count} sig</span>
+            <div class="order-btns">
+              <button type="button" title="Move up" data-dir="-1" data-i="${i}">▲</button>
+              <button type="button" title="Move down" data-dir="1" data-i="${i}">▼</button>
+            </div>
+          </li>
+        `;
+      }).join("");
+
+      list.querySelectorAll(".symbol-item").forEach((el) => {
+        el.addEventListener("dragstart", (e) => {
+          dragSrc = el;
+          el.style.opacity = "0.5";
+          e.dataTransfer.effectAllowed = "move";
+        });
+        el.addEventListener("dragend", () => {
+          el.style.opacity = "1";
+          list.querySelectorAll(".symbol-item").forEach((x) => x.classList.remove("drag-over"));
+        });
+        el.addEventListener("dragover", (e) => {
+          e.preventDefault();
+          el.classList.add("drag-over");
+        });
+        el.addEventListener("dragleave", () => el.classList.remove("drag-over"));
+        el.addEventListener("drop", (e) => {
+          e.preventDefault();
+          el.classList.remove("drag-over");
+          if (!dragSrc || dragSrc === el) return;
+          const from = Number(dragSrc.dataset.index);
+          const to = Number(el.dataset.index);
+          const copy = [...symbolOrder];
+          const [item] = copy.splice(from, 1);
+          copy.splice(to, 0, item);
+          symbolOrder = copy;
+          renderSymbolOrder();
+          renderCharts();
+        });
+      });
+
+      list.querySelectorAll(".order-btns button").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          moveSymbol(Number(btn.dataset.i), Number(btn.dataset.dir));
+        });
+      });
+    }
+
+    function destroyCharts() {
+      Object.values(chartInstances).forEach(({ chart, priceLines, ro }) => {
+        priceLines.forEach((pl) => { try { pl.remove(); } catch (_) {} });
+        if (ro) ro.disconnect();
+        chart.remove();
+      });
+      chartInstances = {};
+    }
+
+    function buildMarketPanel(sym, data) {
+      const decisions = sortDecisionsAsc(filteredDecisions(data.decisions));
+      const bull = decisions.filter((d) => d.trend === "bullish").length;
+      const bear = decisions.filter((d) => d.trend === "bearish").length;
+      const range = overview.date_ranges[sym];
+      const panelId = `panel-${sym.replace(/[^a-z0-9]/gi, "_")}`;
+      const chartId = `chart-${sym.replace(/[^a-z0-9]/gi, "_")}`;
+
+      const decisionRows = decisions.map((d) => `
+        <tr class="clickable panel-decision-row" data-symbol="${sym}" data-time="${d.time_unix}">
+          <td>${fmtDate(d.time)}</td>
+          <td class="${d.action}">${d.action.toUpperCase()}</td>
+          <td><span class="tag">${d.trend}</span> <span class="tag">${d.setup}</span></td>
+          <td><span class="tag">${d.aoi_kind}</span></td>
+          <td>${d.signal_label || d.signal || "—"}</td>
+        </tr>
+      `).join("");
+
+      return `
+        <article class="market-panel" id="${panelId}" data-symbol="${sym}">
+          <div class="market-header">
+            <h3>${symLabel(sym)}</h3>
+            <div class="market-meta">
+              <span>${data.bar_count.toLocaleString()} bars</span>
+              ${range ? `<span>${fmtTime(range.start)} → ${fmtTime(range.end)}</span>` : ""}
+              <span class="bull">${bull} bullish</span>
+              <span class="bear">${bear} bearish</span>
+              <span>${decisions.length} signals shown</span>
+            </div>
+          </div>
+          <div class="chart-box" id="${chartId}"></div>
+          <div class="legend">
+            <span><i style="background:#22c55e"></i> Long confirmation</span>
+            <span><i style="background:#ef4444"></i> Short confirmation</span>
+            <span><i style="background:#3b82f6"></i> Support AOI</span>
+            <span><i style="background:#a855f7"></i> Resistance AOI</span>
+          </div>
+          ${decisions.length ? `
+          <div class="decisions-wrap">
+            <table class="decisions-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Side</th>
+                  <th>Trend · Setup</th>
+                  <th>AOI</th>
+                  <th>Confirmation</th>
+                </tr>
+              </thead>
+              <tbody>${decisionRows}</tbody>
+            </table>
+          </div>` : ""}
+        </article>
+      `;
+    }
+
+    function renderCharts() {
+      destroyCharts();
+      const container = document.getElementById("charts-container");
+      const visible = symbolOrder.filter((sym) => {
+        const symFilter = document.getElementById("filter-symbol").value;
+        return !symFilter || sym === symFilter;
+      });
+
+      if (!visible.length) {
+        container.innerHTML = '<div class="empty">No markets match the current filter</div>';
+        return;
+      }
+
+      container.innerHTML = visible.map((sym) => {
+        const data = marketsBySymbol[sym];
+        if (!data) return "";
+        return buildMarketPanel(sym, data);
+      }).join("");
+
+      visible.forEach((sym) => {
+        const data = marketsBySymbol[sym];
+        const chartId = `chart-${sym.replace(/[^a-z0-9]/gi, "_")}`;
+        const el = document.getElementById(chartId);
+        if (!el || !data) return;
+
+        const prec = data.price_precision ?? detectPrecision(sym);
+        const minMove = data.price_min_move ?? (prec === 3 ? 0.001 : 0.00001);
+        const filtered = sortDecisionsAsc(filteredDecisions(data.decisions));
+        const markers = markersForDecisions(filtered);
+
+        const chart = LightweightCharts.createChart(el, {
+          width: el.clientWidth,
+          height: el.clientHeight,
+          layout: { background: { color: "#0f1419" }, textColor: "#8b9cb3" },
+          grid: { vertLines: { color: "#1e293b" }, horzLines: { color: "#1e293b" } },
+          crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+            vertLine: { visible: true, labelVisible: true },
+            horzLine: { visible: false, labelVisible: false },
+          },
+          rightPriceScale: {
+            borderColor: "#2d3a4f",
+            scaleMargins: { top: 0.06, bottom: 0.06 },
+          },
+          localization: {
+            priceFormatter: (p) => Number(p).toFixed(prec),
+          },
+          timeScale: { borderColor: "#2d3a4f", timeVisible: true, secondsVisible: false },
+          ...chartPanOptions(),
+        });
+
+        const series = chart.addCandlestickSeries({
+          priceFormat: { type: "price", precision: prec, minMove: minMove },
+          upColor: "#22c55e",
+          downColor: "#ef4444",
+          borderUpColor: "#22c55e",
+          borderDownColor: "#ef4444",
+          wickUpColor: "#22c55e",
+          wickDownColor: "#ef4444",
+        });
+
+        series.setData(data.candles);
+        series.setMarkers(markers);
+
+        const priceLines = [];
+        if (showAoi) {
+          data.levels.forEach((lvl) => {
+            const pl = series.createPriceLine({
+              price: lvl.price,
+              color: lvl.color,
+              lineWidth: 1,
+              lineStyle: lvl.lineStyle === 2
+                ? LightweightCharts.LineStyle.Dashed
+                : LightweightCharts.LineStyle.Solid,
+              axisLabelVisible: true,
+              title: lvl.title,
+            });
+            priceLines.push(pl);
+          });
+        }
+
+        chart.timeScale().fitContent();
+
+        const ro = new ResizeObserver(() => {
+          chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+        });
+        ro.observe(el);
+
+        chartInstances[sym] = { chart, series, priceLines, ro, candles: data.candles };
+      });
+
+      setupChartSync(visible);
+
+      document.getElementById("charts-container").onclick = (e) => {
+        const row = e.target.closest(".panel-decision-row");
+        if (!row) return;
+        const t = Number(row.dataset.time);
+        const sym = row.dataset.symbol;
+        if (t && sym) jumpToTime(t, row, sym);
+      };
+    }
+
+    async function reloadMarkets() {
+      const res = await fetch(`/api/analysis/markets?show_aoi=${showAoi}`);
+      const data = await res.json();
+      marketsBySymbol = {};
+      data.markets.forEach((m) => { marketsBySymbol[m.symbol] = m; });
+      if (data.timeline_start) timelineStart = data.timeline_start;
+      if (data.timeline_end) timelineEnd = data.timeline_end;
+      renderCharts();
+    }
+
+    function bindControls() {
+      document.getElementById("sync-time").addEventListener("change", (e) => {
+        timeSyncEnabled = e.target.checked;
+      });
+      document.getElementById("show-aoi").addEventListener("change", async (e) => {
+        showAoi = e.target.checked;
+        await reloadMarkets();
+      });
+      ["filter-trend", "filter-signal", "filter-symbol"].forEach((id) => {
+        document.getElementById(id).addEventListener("change", () => {
+          renderDecisionsLog();
+          renderCharts();
+        });
+      });
+    }
+
+    async function init() {
+      try {
+        const res = await fetch("/api/analysis/overview");
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || res.statusText);
+        }
+        overview = await res.json();
+        symbolOrder = [...overview.symbols];
+        renderMeta();
+        populateFilters();
+        renderSymbolOrder();
+        renderDecisionsLog();
+        bindControls();
+        await reloadMarkets();
+      } catch (e) {
+        document.getElementById("session-meta").textContent = "";
+        document.getElementById("charts-container").innerHTML =
+          `<div class="error">${e.message}<br><br>Launch with <code>python -m borex.viewer --strategy alexg3 …</code></div>`;
+        document.getElementById("decisions-log").innerHTML =
+          `<tr><td colspan="8" class="error">${e.message}</td></tr>`;
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

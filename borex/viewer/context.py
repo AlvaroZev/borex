@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -10,6 +10,9 @@ from borex.alexg.aoi2 import build_bidirectional_aoi
 from borex.alexg.swings import detect_swings
 from borex.backtest.portfolio import Trade
 from borex.models.candle import Candle
+
+if TYPE_CHECKING:
+    from borex.viewer.analysis import MarketAnalysis
 
 
 def _ts_iso(ts: object) -> str:
@@ -20,17 +23,54 @@ def _ts_unix(ts: object) -> int:
     return int(pd.Timestamp(ts).timestamp())
 
 
+def _parse_ghost_trade(pattern: str, trade: Trade) -> dict[str, Any] | None:
+    if not (pattern.startswith("alexg4|") or pattern.startswith("alexg5|")):
+        return None
+    for part in pattern.split("|"):
+        if not part.startswith("g:"):
+            continue
+        payload = part[2:].split(":")
+        if len(payload) != 4:
+            continue
+        setup_index, og_entry, og_sl, og_tp = payload
+        return {
+            "setup_index": int(setup_index),
+            "entry_price": float(og_entry),
+            "stop_loss": float(og_sl),
+            "take_profit": float(og_tp),
+        }
+    # Older alexg4/alexg5 trades: infer original plan from executed geometry.
+    if trade.stop_loss is None or trade.take_profit is None:
+        return None
+    if trade.side.value == "long":
+        risk = trade.entry_price - trade.stop_loss
+        reward = trade.take_profit - trade.entry_price
+        og_entry = trade.entry_price + risk
+        og_tp = og_entry + reward
+    else:
+        risk = trade.stop_loss - trade.entry_price
+        reward = trade.entry_price - trade.take_profit
+        og_entry = trade.entry_price - risk
+        og_tp = og_entry - reward
+    return {
+        "setup_index": max(0, trade.entry_index - 1),
+        "entry_price": og_entry,
+        "stop_loss": trade.entry_price,
+        "take_profit": og_tp,
+    }
+
+
 def _parse_alexg2_pattern(pattern: str) -> dict[str, str]:
     parts = pattern.split("|")
-    if len(parts) < 5 or parts[0] not in ("alexg2", "alexg3"):
+    if len(parts) < 5 or parts[0] not in ("alexg2", "alexg3", "alexg4", "alexg5"):
         return {}
     out = {
-        "trend": parts[3] if parts[0] == "alexg3" else parts[1],
-        "setup": parts[4] if parts[0] == "alexg3" else parts[2],
-        "aoi_kind": parts[5] if parts[0] == "alexg3" else parts[3],
-        "signal": parts[6] if parts[0] == "alexg3" else parts[4],
+        "trend": parts[3] if parts[0] in ("alexg3", "alexg4", "alexg5") else parts[1],
+        "setup": parts[4] if parts[0] in ("alexg3", "alexg4", "alexg5") else parts[2],
+        "aoi_kind": parts[5] if parts[0] in ("alexg3", "alexg4", "alexg5") else parts[3],
+        "signal": parts[6] if parts[0] in ("alexg3", "alexg4", "alexg5") else parts[4],
     }
-    if parts[0] == "alexg3" and len(parts) > 2:
+    if parts[0] in ("alexg3", "alexg4", "alexg5") and len(parts) > 2:
         out["currency_bias"] = parts[2]
         out["pair"] = parts[1]
     return out
@@ -96,7 +136,12 @@ def _analysis_side(meta: dict[str, str]) -> str | None:
 def trade_summary(
     trade: Trade, leverage: float, symbol: str = "", inversed: bool = False
 ) -> dict[str, Any]:
-    signal_index = max(0, trade.entry_index - 1)
+    ghost = _parse_ghost_trade(trade.pattern, trade)
+    signal_index = (
+        ghost["setup_index"]
+        if ghost is not None
+        else max(0, trade.entry_index - 1)
+    )
     meta = _parse_alexg2_pattern(trade.pattern)
     signal_label = _signal_label(meta)
     precision, _ = _price_precision(symbol)
@@ -192,7 +237,12 @@ def build_trade_chart(
     bars_before: int = 55,
     bars_after: int = 20,
 ) -> dict[str, Any]:
-    signal_index = max(0, trade.entry_index - 1)
+    ghost = _parse_ghost_trade(trade.pattern, trade)
+    signal_index = (
+        ghost["setup_index"]
+        if ghost is not None
+        else max(0, trade.entry_index - 1)
+    )
     exit_index = trade.exit_index if trade.exit_index is not None else signal_index
     start = max(0, signal_index - bars_before)
     end = min(len(candles), exit_index + bars_after + 1)
@@ -321,6 +371,7 @@ class ViewerSession:
     tp_fraction: float = 1.0
     true_sl: bool = False
     candles_by_symbol: dict[str, list[Candle]] | None = None
+    analysis: MarketAnalysis | None = None
 
     def trade_summaries(self) -> list[dict[str, Any]]:
         out = []

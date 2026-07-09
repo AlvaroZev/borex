@@ -43,6 +43,7 @@ class BacktestConfig:
     close_on_opposite_signal: bool = False
     true_sl: bool = False  # SL at margin wipe; TP at true_sl_rr
     true_sl_rr: float = 2.0
+    rr_factor: float = 1.0  # multiply winrate-derived RR (e.g. 1.1 = 10% wider TP)
     spread_pips: float = 0.0
     slippage_pips: float = 0.0
     commission_per_trade: float = 0.0
@@ -124,11 +125,26 @@ def _confirmation_signal_from_pattern(pattern: str) -> str:
     parts = pattern.split("|")
     if not parts:
         return "unknown"
-    if parts[0] == "alexg2" and len(parts) >= 5:
+    if parts[0] in ("alexg2",) and len(parts) >= 5:
         return parts[4]
-    if parts[0] == "alexg3" and len(parts) >= 7:
+    if parts[0] in ("alexg3", "alexg4", "alexg5") and len(parts) >= 7:
         return parts[6]
     return parts[-1] if parts[-1] else "unknown"
+
+
+def _signal_entry(
+    signal: Signal, index: int, candles: list[Candle]
+) -> tuple[int, float, object] | None:
+    """Execution bar/price for a signal (AlexG4 fills at SL on the touch bar)."""
+    if signal.pattern.startswith("alexg4|") or signal.pattern.startswith("alexg5|"):
+        if index >= len(candles):
+            return None
+        candle = candles[index]
+        return index, signal.price, candle.timestamp
+    if index + 1 >= len(candles):
+        return None
+    next_candle = candles[index + 1]
+    return index + 1, next_candle.open, next_candle.timestamp
 
 
 def _build_confirmation_stats(trades: list[Trade]) -> list[dict[str, Any]]:
@@ -321,13 +337,10 @@ class BacktestEngine:
         index: int,
         candles: list[Candle],
     ) -> None:
-        # Ejecutar en la apertura de la siguiente vela (evita look-ahead bias)
-        if index + 1 >= len(candles):
+        entry = _signal_entry(signal, index, candles)
+        if entry is None:
             return
-
-        next_candle = candles[index + 1]
-        mid_price = next_candle.open
-        exec_index = index + 1
+        exec_index, mid_price, exec_timestamp = entry
         action = self._effective_action(signal.action)
 
         if portfolio.open_trade is not None and self.config.close_on_opposite_signal:
@@ -342,7 +355,7 @@ class BacktestEngine:
                     portfolio,
                     exec_index,
                     mid_price,
-                    next_candle.timestamp,
+                    exec_timestamp,
                     "opposite_signal",
                 )
 
@@ -351,7 +364,10 @@ class BacktestEngine:
             exec_price = self._fill_entry(mid_price, side)
             stop_loss = signal.stop_loss
             take_profit = signal.take_profit
-            rr = rr_from_winrate(portfolio.win_rate, self.config.true_sl_rr)
+            rr = (
+                rr_from_winrate(portfolio.win_rate, self.config.true_sl_rr)
+                * self.config.rr_factor
+            )
 
             # Inverse flips fill side first. Mirror analysis SL/TP onto that
             # side BEFORE margin sizing — never after (that double-flips levels).
@@ -385,7 +401,7 @@ class BacktestEngine:
                 action,
                 exec_index,
                 exec_price,
-                next_candle.timestamp,
+                exec_timestamp,
                 signal.pattern,
                 stop_loss=stop_loss,
                 take_profit=take_profit,

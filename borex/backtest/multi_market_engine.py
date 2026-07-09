@@ -12,7 +12,7 @@ from borex.alexg.multi_market import (
 )
 from borex.backtest.costs import infer_pip_size, TradeCosts, apply_entry_fill, apply_exit_fill
 from borex.backtest.engine import BacktestConfig, BacktestResult, mirror_sl_tp_for_inverse
-from borex.backtest.engine import _build_confirmation_stats
+from borex.backtest.engine import _build_confirmation_stats, _signal_entry
 from borex.backtest.margin_stops import (
     margin_stop_out_prices,
     rr_from_winrate,
@@ -25,6 +25,7 @@ from borex.models.candle import Candle, Signal, SignalAction
 
 if TYPE_CHECKING:
     from borex.alexg.strategy3 import AlexG3Strategy
+    from borex.alexg.strategy4 import AlexG4Strategy
 
 
 @dataclass
@@ -162,19 +163,21 @@ class MultiMarketEngine:
         index: int,
         candles: list[Candle],
     ) -> None:
-        if index + 1 >= len(candles):
+        entry = _signal_entry(signal, index, candles)
+        if entry is None:
             return
-
-        next_c = candles[index + 1]
+        exec_index, mid_price, exec_timestamp = entry
         costs = self._costs(symbol)
         action = self._effective_action(signal.action)
         side = PositionSide.LONG if action == SignalAction.BUY else PositionSide.SHORT
-        exec_price = apply_entry_fill(next_c.open, side, costs)
-        exec_index = index + 1
+        exec_price = apply_entry_fill(mid_price, side, costs)
 
         stop_loss = signal.stop_loss
         take_profit = signal.take_profit
-        rr = rr_from_winrate(portfolio.win_rate, self.config.true_sl_rr)
+        rr = (
+            rr_from_winrate(portfolio.win_rate, self.config.true_sl_rr)
+            * self.config.rr_factor
+        )
 
         # Inverse flips the fill side first. Mirror analysis SL/TP onto that
         # side BEFORE margin sizing — never after (that double-flips levels).
@@ -206,7 +209,7 @@ class MultiMarketEngine:
             action,
             exec_index,
             exec_price,
-            next_c.timestamp,
+            exec_timestamp,
             signal.pattern,
             stop_loss=stop_loss,
             take_profit=take_profit,
