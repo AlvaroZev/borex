@@ -1,269 +1,257 @@
-# Borex
+# Borex — Forex Backtesting Platform
 
-Backtesting de trading con patrones de velas japonesas. Simula trades sobre datos históricos (Yahoo Finance o CSV).
+Local-first backtesting for forex pairs (EUR/USD, GBP/USD, etc.). Download OHLCV, run strategies in mass, rank results, and prepare for AI parameter optimization.
 
-## Instalación
+## Why Python
+
+Python fits data pipelines, pandas/numpy backtests, and future ML/AI optimizers. Your Go experience still applies to deploying APIs; the core engine stays Python. FastAPI serves the React UI.
+
+## Yahoo data limits (verified)
+
+| Timeframe | Max history |
+|-----------|-------------|
+| 1m | ~30 days (7-day chunks) |
+| 15m / 30m | ~60 days |
+| 1h / 4h | ~730 days |
+| 1d / 1wk | Full history |
+
+Deeper 1m history can be added later via a pluggable source (e.g. Dukascopy).
+
+## Quick start
 
 ```powershell
-cd borex
 pip install -r requirements.txt
+
+# Download all forex pairs × timeframes
+python -m borex download --all
+
+# Single backtest
+python -m borex backtest --strategy sma_cross -s EURUSD=X -t 1h
+
+# Mass: all strategies × symbols × timeframes
+python -m borex mass --workers 8
+
+# API + React UI (live progress)
+python -m borex serve
+cd frontend ; npm install ; npm run dev
 ```
 
-## Comando base
+Open http://localhost:5173 — mass backtests and downloads stream live progress via SSE (progress bar, live feed, top results updating as each job finishes).
+
+## CLI
+
+| Command | Description |
+|---------|-------------|
+| `download --all` | Cache all pairs/timeframes |
+| `backtest` | Single run |
+| `mass` | Cartesian product run |
+| `walkforward` | 70/30 split or `--rolling` windows |
+| `walkforward --rolling --optimize` | Rolling OOS with train-window param search |
+| `sweep` | Parameter grid search with SQLite persistence |
+| `backtest --regimes` | Include bull/bear/sideways + vol breakdown |
+| `audit --all` | Data integrity check (gaps, OHLC, manifests) |
+| `audit --fix` | Rebuild corrupt datasets (duplicate-TF, bad chunks) |
+| `audit --repair-manifests` | Backfill dataset manifests for reproducibility |
+| `paper` | Paper trading on live-refreshed data |
+| `monitor` | Session health, divergence, decision log |
+| `revalidate` | Decay check: baseline vs recent window |
+| `screen` | Mass sweep + rolling WF; promote OOS configs passing gates |
+| `pipeline run` | Full testing pipeline: audit → screen → revalidate → retire |
+| `pipeline tick` | Tick all active paper sessions |
+| `pipeline watch` | Daemon: tick + periodic revalidate |
+| `list --cached` | Show local data |
+| `list --leaderboard` | Top results by metric |
+| `serve` | FastAPI on :8000 |
+
+## Defaults
+
+- Capital: $1,000
+- Leverage: 500× (configurable up to 5,000)
+- Portfolio: up to 5 concurrent positions
+- Exits: price-reached SL/TP; same-bar conflict → stop loss first; no exit on entry bar
+
+## Risk management (Phase 3)
+
+Position sizing and portfolio guardrails apply to `backtest`, `mass`, `walkforward`, and `sweep`:
+
+| Flag | Description |
+|------|-------------|
+| `--size-mode fixed` | Default; use signal `size_pct` |
+| `--size-mode atr_risk` | Size from ATR stop distance + `--risk-per-trade` |
+| `--size-mode kelly` | Half-Kelly from closed-trade stats (after `--kelly-min-trades`) |
+| `--max-drawdown 0.2` | Halt new entries after 20% peak drawdown |
+| `--max-daily-loss 0.05` | Halt new entries after 5% daily loss |
+| `--max-currency-exposure 1` | Limit net same-direction bets per currency |
+| `--no-correlation-limit` | Disable currency exposure checks |
+
+Example:
 
 ```powershell
-python main.py
-python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h -v
+python -m borex backtest --strategy sma_cross -s EURUSD=X -t 1h `
+  --size-mode atr_risk --max-drawdown 0.2 --max-daily-loss 0.05
 ```
 
-Defaults (candles): `EURUSD=X`, periodo `30d`, intervalo `1h`, capital `$10,000`, SL `2%`, TP `4%`.
+Backtest JSON includes `risk_stats` (halt reason, circuit breaker triggers, correlation blocks).
 
-AlexG Method activa MTF automáticamente y usa SL/TP por estructura (RR mín. 3.0).
+## Execution realism (Phase 4)
 
-## Parámetros
+Model spread, slippage, fill timing, and reconcile theoretical vs actual PnL:
 
-| Parámetro | Corto | Default | Descripción |
-|-----------|-------|---------|-------------|
-| `--strategy` | — | `candles` | `candles` o `alexg` (AlexG Method) |
-| `--symbol` | `-s` | `EURUSD=X` | Par o activo en Yahoo Finance |
-| `--period` | `-p` | `30d` | Cuánto historial descargar |
-| `--interval` | `-i` | `1h` | Timeframe de ejecución (mín. `15m` con MTF) |
-| `--mtf` | `-f` | off | Alineación multi-timeframe (todos los TF superiores) |
-| `--filter-mode` | — | `trend` | Filtro MTF: `trend` o `off` |
-| `--csv` | — | — | CSV local en lugar de Yahoo |
-| `--capital` | — | `10000` | Capital inicial simulado |
-| `--leverage` | `-l` | `1` | Apalancamiento (1–1000) |
-| `--stop-loss` | — | `0.02` | Stop loss (0.02 = 2%) |
-| `--take-profit` | — | `0.04` | Take profit (0.04 = 4%) |
-| `--patterns` | — | todos | Patrones específicos a usar |
-| `--verbose` | `-v` | off | Lista cada trade ejecutado |
-| `--inversed` | — | off | Invierte dirección de trades (buy ↔ sell) |
-| `--spread-pips` | — | `0` | Spread en pips (round-trip) |
-| `--slippage-pips` | — | `0` | Slippage adverso por fill |
-| `--commission` | — | `0` | Comisión USD por trade cerrado |
-| `--min-score` | — | `70` | AlexG: score mínimo de confluencia |
-| `--min-rr` | — | `3.0` | AlexG: risk/reward mínimo |
-| `--max-tp-pct` | — | — | AlexG: TP máximo %% (ej. `0.01` = 1%) |
-| `--sl-mult` | — | `1.0` | AlexG: ancho del SL estructural (`1.25` = 25% más lejos) |
+| Flag | Description |
+|------|-------------|
+| `--spread 0.00005` | Half-spread per side (~0.5 pip on EURUSD) |
+| `--slippage-mode atr` | Scale slippage with ATR volatility |
+| `--fill-mode next_open` | Enter on next bar open (not signal close) |
+| `--entry-delay 1` | Additional bar latency before fill |
+| `--commission 0.0001` | Per-side commission on notional |
+
+Backtest JSON includes `execution_stats`: commission, spread/slippage cost, theoretical PnL, execution drag.
+
+### Paper trading
+
+Run strategies on refreshed Yahoo data with simulated capital:
 
 ```powershell
-python main.py --help
+# Create session (warms up on full history)
+python -m borex paper --strategy sma_cross -s EURUSD=X -t 1h --spread 0.00005
+
+# Single tick (process new bars since last poll)
+python -m borex paper --session <id>
+
+# Poll every 5 minutes
+python -m borex paper --session <id> --loop --poll 300
+
+python -m borex paper --list
 ```
 
-## AlexG Method
+API: `POST /api/paper/sessions`, `POST /api/paper/sessions/{id}/tick`, `GET /api/paper/sessions`
 
-Sistema de confluencia en **4 pilares** (todos obligatorios):
+## Live deployment (Phase 5)
 
-1. **Trend** — HH/HL (alcista) o LL/LH (bajista) **+ patrón de continuación** (bandera, pennant, tres soldados/cuervos, swings en secuencia)
-2. **AOI** — soporte/resistencia con mínimo 3 toques
-3. **Break & Retest** — cuerpo rompe nivel → retest → confirmación
-4. **Entry confirmation** — engulfing, rechazo por mecha, momentum
+Kill-switch, decision audit log, and live vs backtest divergence monitoring for paper sessions:
 
-Además: MTF parcialmente alineado (≥50% de TF superiores), RR ≥ 3.0, score ≥ 70.
+| Flag / command | Description |
+|----------------|-------------|
+| `--max-errors 3` | Kill after consecutive tick failures |
+| `--stale-minutes 180` | Kill on tick if data is stale |
+| `--divergence-warn 0.2` | Alert when live return diverges 20% from baseline |
+| `paper --kill --session ID` | Manual kill-switch |
+| `paper --resume --session ID` | Reset kill-switch |
+| `monitor --session ID` | Health, divergence, alerts |
+| `monitor --session ID --decisions` | Full decision audit trail |
 
-| Score | Grado |
-|-------|-------|
-| 0–40 | Ignore |
-| 40–70 | Watchlist |
-| 70–100 | Valid Trade |
-| 100+ | A+ Setup |
+Every signal, entry, exit, block, halt, and error is logged to SQLite (`decision_log`). Alerts stored in `live_alerts`.
 
 ```powershell
-# AlexG en 1h con MTF automático
-python main.py --strategy alexg -s "GBPUSD=X" -p 60d -i 1h -v
-
-# 15m entries, score mínimo 80, RR mínimo 5
-python main.py --strategy alexg -s "EURUSD=X" -p 60d -i 15m --min-score 80 --min-rr 5 -v
-
-# SL más ancho + RR 5 + TP cap 2% (parámetros optimizados en 730d GBPUSD)
-python main.py --strategy alexg -s "GBPUSD=X" -p 730d -i 1h --min-rr 5 --max-tp-pct 0.02 --sl-mult 1.25 --use-cache
+python -m borex paper --strategy sma_cross -s EURUSD=X -t 1h --max-errors 3
+python -m borex paper --session <id> --monitor
+python -m borex monitor --session <id> --decisions --alerts
+python -m borex paper --session <id> --kill --kill-reason "testing"
 ```
 
-## Ejemplos
+API: `GET /api/paper/sessions/{id}/monitor`, `/decisions`, `/alerts`, `POST .../kill`, `POST .../resume`
 
-### Backtest rápido (~100 trades)
+## Iteration (Phase 6)
+
+Periodic re-validation detects strategy decay when recent performance diverges from historical baseline:
+
+| Flag | Description |
+|------|-------------|
+| `--recent-months 3` | Recent window to re-test |
+| `--baseline-months 12` | Baseline window (default: all history before recent) |
+| `--decay-sharpe 0.5` | Sharpe drop threshold for `decayed` verdict |
+| `--decay-return 15` | Return lag threshold (percentage points) |
+| `--session ID` | Include paper session for capital scale recommendation |
+
+Verdicts: `healthy`, `warning`, `decayed`, `insufficient_data`. Capital recommendation requires min paper days/trades, healthy decay verdict, and no kill-switch.
 
 ```powershell
-python main.py
-python main.py -v
+python -m borex revalidate --strategy sma_cross -s EURUSD=X -t 1h --recent-months 3
+python -m borex revalidate --strategy sma_cross -s EURUSD=X --session <paper_id>
+python -m borex revalidate --list
+python -m borex revalidate --id <run_id>
 ```
 
-### GBP/USD — 1h, 60 días, SL 1%, TP 2%
+API: `POST /api/revalidate`, `GET /api/revalidate`, `GET /api/revalidate/{id}`
+
+### Automated screen pipeline
+
+Run parameter sweeps + rolling walk-forward across strategies × symbols × timeframes. Only configs that pass OOS gates are promoted (ranked by avg OOS Sharpe). Optional `--create-paper` spins up paper sessions for the top N.
+
+| Gate flag | Default | Description |
+|-----------|---------|-------------|
+| `--min-oos-sharpe` | 0.5 | Min average OOS Sharpe across folds |
+| `--min-oos-trades` | 10 | Min total OOS trades |
+| `--max-oos-drawdown` | 35 | Max OOS drawdown (%) |
+| `--min-positive-folds` | 0.5 | Min fraction of folds with positive OOS return |
+
+Defaults to **1h** entry timeframe only (pass `--timeframes` for more). Uses train-window optimization like `walkforward --rolling --optimize`.
 
 ```powershell
-python main.py -s "GBPUSD=X" -p 60d -i 1h --stop-loss 0.01 --take-profit 0.02 -v
+# Quick smoke (1 strategy × 1 pair)
+python -m borex screen --strategies sma_cross --symbols EURUSD=X --workers 1 --max-combos 4 --max-points 2
+
+# Full screen with cost realism + paper for top 3
+python -m borex screen --spread 0.00005 --min-oos-sharpe 0.5 --create-paper --top-n-paper 3
+
+python -m borex screen --list
+python -m borex screen --id <run_id>
 ```
 
-### Multi-timeframe (alineación completa)
+API: `POST /api/screen`, `GET /api/screen`, `GET /api/screen/{id}`
 
-Con `--mtf` / `-f`, **no entra** al trade a menos que **todos** los timeframes superiores estén alineados (alcista para compras, bajista para ventas). Incluye siempre `1d` y `1wk` cuando aplican.
+React UI **Research** tab includes a screen panel (defaults to sma_cross + EURUSD for a quick run).
 
-Escalera: `15m → 30m → 1h → 4h → 1d → 1wk`
+### Testing pipeline (hands-off automation)
 
-Ejemplos según timeframe de ejecución:
-
-| `-i` | Timeframes que deben alinear |
-|------|------------------------------|
-| `15m` | 30m, 1h, 4h, 1d, 1wk |
-| `1h` | 4h, 1d, 1wk |
-| `4h` | 1d, 1wk |
+Chain audit, screen, paper, revalidate, and auto-retire decayed sessions:
 
 ```powershell
-# 1h con alineación completa (4h + 1d + 1wk)
-python main.py -s "GBPUSD=X" -p 60d -i 1h -f --stop-loss 0.01 --take-profit 0.02 -v
+# Weekly research (creates paper for top promoted by default)
+python -m borex pipeline run --spread 0.00005 --min-oos-sharpe 0.5 --workers 8
 
-# 15m con todos los TF superiores
-python main.py -s "GBPUSD=X" -p 60d -i 15m -f --stop-loss 0.01 --take-profit 0.02 -v
+# Revalidate-only pass (skip screen)
+python -m borex pipeline run --skip-screen
+
+# Tick all active paper sessions (+ revalidate + kill decayed)
+python -m borex pipeline tick --revalidate
+
+# Daemon: tick every 5 min, revalidate daily (~288 cycles @ 5min)
+python -m borex pipeline watch --poll 300 --revalidate-every 288
+
+python -m borex pipeline list
+python -m borex pipeline show --id <run_id>
 ```
 
-Desactivar filtro (detecta patrones sin exigir alineación MTF):
+**Task Scheduler setup (Windows):**
+- Weekly: `pipeline run` (Sunday night)
+- Always-on: `pipeline watch` (separate terminal/service)
+- Webhook digest sent on each `pipeline run` if alerts enabled
 
-```powershell
-python main.py -s "GBPUSD=X" -p 60d -i 1h -f --filter-mode off -v
-```
+API: `POST /api/pipeline/run`, `POST /api/pipeline/tick`, `GET /api/pipeline`, `GET /api/pipeline/{id}`
 
-### Otros pares forex
+### Alert delivery + UI
 
-```powershell
-python main.py -s "EURUSD=X" -v
-python main.py -s "USDJPY=X" -p 30d -i 1h
-```
+Outbound alerts fire on every `live_alerts` insert (stale data, divergence, kill-switch, etc.):
 
-### Cripto o acciones
+- Configure in UI **Paper & revalidate** tab, or `data/alert_config.json`
+- Env override: `BOREX_WEBHOOK_URL`, `BOREX_SLACK_WEBHOOK_URL`
+- API: `GET/PUT /api/alerts/config`, `POST /api/alerts/test`
 
-```powershell
-python main.py -s "BTC-USD" -p 60d -i 1h -v
-python main.py -s "AAPL" -p 1y -i 1d
-```
+React UI tab **Paper & revalidate**: session monitor, alerts/decisions feed, webhook config, decay re-validation.
 
-### Ajustar cantidad de trades
+## Adding strategies
 
-```powershell
-python main.py -p 25d          # ~80 trades (1h)
-python main.py -p 35d          # ~120 trades (1h)
-python main.py -p 1y -i 1d     # ~10-15 trades (diario)
-python main.py -p 60d -i 15m   # muchos trades (intraday)
-```
+Implement `Strategy` in `borex/strategy/`, expose `param_schema()`, register with `@register`. Your strategy list in the next prompt will be added here.
 
-### Cambiar riesgo
-
-```powershell
-python main.py --stop-loss 0.01 --take-profit 0.02
-python main.py --capital 50000 --stop-loss 0.015 -v
-python main.py -s "GBPUSD=X" -p 60d -i 1h --leverage 100 --stop-loss 0.01 --take-profit 0.02 -v
-python main.py -s "GBPUSD=X" -p 60d -i 1h --inversed -v
-python main.py -s "GBPUSD=X" -p 30d -i 1h --spread-pips 2 --slippage-pips 0.5 --commission 3 -v
-```
-
-## Roadmap v2 (prioridad)
-
-1. ~~Costos de ejecución (spread, slippage, comisión)~~ — implementado
-2. **Optimización de parámetros** — grid search (`min_score`, `min_rr`, etc.)
-3. **Walk-forward** — train/validate/forward splits
-4. ATR-adaptive swings (reemplazar lookback fijo)
-5. AOI v2 (base + impulso)
-6. Monte Carlo + métricas (Sharpe, Sortino, Calmar)
-
-### Solo ciertos patrones
-
-```powershell
-python main.py --patterns hammer bullish_engulfing morning_star -v
-python main.py --patterns shooting_star bearish_engulfing evening_star -v
-```
-
-### Desde CSV
-
-```powershell
-python main.py --csv "C:\ruta\mis_velas.csv" -v
-```
-
-Formato del CSV:
-
-```text
-Date,Open,High,Low,Close,Volume
-2025-01-02,1.0350,1.0380,1.0320,1.0370,0
-2025-01-03,1.0370,1.0400,1.0340,1.0390,0
-```
-
-## Patrones disponibles
-
-| Nombre | Señal |
-|--------|-------|
-| `hammer` | Compra |
-| `shooting_star` | Venta |
-| `bullish_engulfing` | Compra |
-| `bearish_engulfing` | Venta |
-| `morning_star` | Compra |
-| `evening_star` | Venta |
-| `three_white_soldiers` | Compra |
-| `three_black_crows` | Venta |
-
-Sin `--patterns` se usan todos.
-
-## Símbolos Yahoo Finance
-
-| Par | Símbolo |
-|-----|---------|
-| EUR/USD | `EURUSD=X` |
-| GBP/USD | `GBPUSD=X` |
-| USD/JPY | `USDJPY=X` |
-| AUD/USD | `AUDUSD=X` |
-
-**Periodos:** `5d`, `1mo`, `3mo`, `6mo`, `1y`, `2y`, `30d`, `60d`, `730d`
-
-**Intervalos:** `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1wk`
-
-Para MTF, el timeframe de filtro (`-f`) debe ser **mayor** que el de ejecución (`-i`). El TF superior se construye por resample desde `-i` cuando encaja (ej. 1h → 4h).
-
-## Multi-timeframe (MTF)
-
-- **Ejecución (`-i`):** patrones y trades simulados (mínimo `15m` con MTF).
-- **Filtro (`-f` / `--mtf`):** exige que **todos** los TF superiores confirmen la dirección.
-- Solo se usan velas **cerradas** en cada TF (sin look-ahead).
-- Compra: 30m, 1h, 4h, 1d y 1wk alcistas (según `-i`).
-- Venta: todos bajistas.
-
-```
-15m: [==][==][==]     ← patrones (ejemplo)
-30m: [====][====]
-1h:  [========]
-4h:  [================]
-1d:  [========================================]
-1wk: [================================================================]  ← todos deben coincidir
-```
-
-## Fuente de datos
-
-- **Por defecto:** [Yahoo Finance](https://finance.yahoo.com/) vía la librería `yfinance`.
-- **Alternativa:** CSV propio con `--csv`.
-
-## Salida del backtest
-
-```
-Estrategia: candle_patterns
-Símbolo: GBPUSD=X (1h)
-Capital inicial: $10,000.00
-Capital final: ...
-Retorno total: ...
-Max drawdown: ...
-Trades: ... (W: ... / L: ...)
-Win rate: ...
-Velas analizadas: ...
-```
-
-Con `-v` se listan todos los trades: dirección, patrón, entrada/salida, PnL y motivo de cierre (`stop_loss`, `take_profit`, `opposite_signal`, `end_of_data`).
-
-## Estructura del proyecto
+## Project layout
 
 ```
 borex/
-├── main.py              # CLI
-├── requirements.txt
-└── borex/
-    ├── models/          # Vela OHLCV y señales
-    ├── patterns/        # Detección de patrones
-    ├── strategy/        # Estrategias
-    ├── alexg/           # AlexG Method (trend, AOI, break/retest, scoring)
-    ├── backtest/        # Motor de simulación
-    └── data/            # Carga de datos y alineación MTF
+  data/       download + parquet cache
+  strategy/   pluggable strategies + param schemas
+  backtest/   engine, portfolio, execution
+  runner/     mass runs, walk-forward, SQLite results
+  api/        FastAPI for React UI
+frontend/     Vite + React dashboard
 ```

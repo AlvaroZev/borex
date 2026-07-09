@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/api/client.ts","./src/components/liverunpanel.tsx","./src/components/papermonitorpanel.tsx","./src/components/revalidatepanel.tsx","./src/components/screenpanel.tsx"],"version":"5.9.3"}

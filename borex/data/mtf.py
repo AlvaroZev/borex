@@ -1,119 +1,83 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 import pandas as pd
 
-from borex.data.loader import load_filter_candles
-from borex.data.timeframe import (
-    filter_intervals_for_execution,
-    interval_to_timedelta,
-    validate_higher_timeframe,
-)
-from borex.models.candle import Candle, SignalAction
+from borex.data.store import load_ohlcv
+from borex.models.signal import Candle
+from borex.strategy.base import candles_from_df
+
+TF_MINUTES: dict[str, int] = {
+    "1m": 1,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "4h": 240,
+    "1d": 1440,
+    "1wk": 10080,
+}
 
 
-@dataclass
-class MultiTimeframeContext:
-    """
-    Contexto MTF: alinea velas de ejecución con múltiples timeframes superiores.
-
-    Solo expone velas ya cerradas (sin look-ahead). Entrada válida solo si
-    TODOS los timeframes de filtro confirman la dirección.
-    """
-
-    execution_interval: str
-    filter_intervals: list[str]
-    filter_candles: dict[str, list[Candle]]
-    _alignments: dict[str, list[int]] = field(repr=False)
-
-    @property
-    def filter_interval(self) -> str:
-        """Etiqueta compacta para reportes."""
-        return "+".join(self.filter_intervals)
-
-    def filter_index_at(self, execution_index: int, interval: str) -> int | None:
-        alignment = self._alignments.get(interval)
-        if alignment is None or execution_index < 0 or execution_index >= len(alignment):
-            return None
-        idx = alignment[execution_index]
-        return idx if idx >= 0 else None
-
-    def filter_candle_at(self, execution_index: int, interval: str) -> Candle | None:
-        idx = self.filter_index_at(execution_index, interval)
-        if idx is None:
-            return None
-        return self.filter_candles[interval][idx]
-
-    def all_filters_align(self, execution_index: int, action: SignalAction) -> bool:
-        for interval in self.filter_intervals:
-            candle = self.filter_candle_at(execution_index, interval)
-            if candle is None:
-                return False
-            if action == SignalAction.BUY and not candle.is_bullish:
-                return False
-            if action == SignalAction.SELL and not candle.is_bearish:
-                return False
-        return True
+def tf_minutes(tf: str) -> int:
+    if tf not in TF_MINUTES:
+        raise ValueError(f"Unknown timeframe: {tf}")
+    return TF_MINUTES[tf]
 
 
-def align_timeframes(
-    execution: list[Candle],
-    filter_candles: list[Candle],
-    execution_interval: str,
-    filter_interval: str,
+def bar_open(ts: object) -> pd.Timestamp:
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None:
+        return t.tz_localize("UTC")
+    return t.tz_convert("UTC")
+
+
+def bar_close(ts: object, tf: str) -> pd.Timestamp:
+    return bar_open(ts) + pd.Timedelta(minutes=tf_minutes(tf))
+
+
+def build_htf_alignment(
+    entry_candles: list[Candle],
+    htf_candles: list[Candle],
+    htf_tf: str,
 ) -> list[int]:
     """
-    Para cada vela de ejecución, devuelve el índice de la última vela de filtro
-    completamente cerrada al momento del cierre de esa vela.
+    For each entry bar, index of the last fully closed HTF bar (no lookahead).
+    Returns -1 if no HTF bar has closed yet.
     """
-    validate_higher_timeframe(execution_interval, filter_interval)
+    if not htf_candles:
+        return [-1] * len(entry_candles)
 
-    exec_td = interval_to_timedelta(execution_interval)
-    filter_td = interval_to_timedelta(filter_interval)
-    alignment: list[int] = []
-    filter_idx = -1
-
-    for exec_c in execution:
-        exec_close = pd.Timestamp(exec_c.timestamp) + exec_td
-
-        while filter_idx + 1 < len(filter_candles):
-            candidate = filter_candles[filter_idx + 1]
-            candidate_close = pd.Timestamp(candidate.timestamp) + filter_td
-            if candidate_close <= exec_close:
-                filter_idx += 1
-            else:
-                break
-
-        alignment.append(filter_idx)
-
-    return alignment
+    htf_closes = [bar_close(c.timestamp, htf_tf) for c in htf_candles]
+    align: list[int] = []
+    htf_i = -1
+    for ec in entry_candles:
+        et = bar_open(ec.timestamp)
+        while htf_i + 1 < len(htf_closes) and htf_closes[htf_i + 1] <= et:
+            htf_i += 1
+        align.append(htf_i)
+    return align
 
 
-def build_full_mtf_context(
-    execution: list[Candle],
-    execution_interval: str,
+def load_bias_dfs(
     symbol: str,
-    period: str,
-    cache_mode: str = "auto",
-) -> MultiTimeframeContext:
-    """Construye contexto MTF con todos los TF superiores (15m→1wk)."""
-    filter_intervals = filter_intervals_for_execution(execution_interval)
-    filter_candles: dict[str, list[Candle]] = {}
-    alignments: dict[str, list[int]] = {}
+    bias_tfs: tuple[str, ...],
+    *,
+    end: str | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Load full HTF history (no start trim) so indicators/warmup have prior bars."""
+    out: dict[str, pd.DataFrame] = {}
+    for tf in bias_tfs:
+        out[tf] = filter_df_range(load_ohlcv(symbol, tf), None, end)
+    return out
 
-    for interval in filter_intervals:
-        candles = load_filter_candles(
-            symbol, period, execution, execution_interval, interval, cache_mode
-        )
-        filter_candles[interval] = candles
-        alignments[interval] = align_timeframes(
-            execution, candles, execution_interval, interval
-        )
 
-    return MultiTimeframeContext(
-        execution_interval=execution_interval,
-        filter_intervals=filter_intervals,
-        filter_candles=filter_candles,
-        _alignments=alignments,
-    )
+def load_htf_candles(symbol: str, timeframe: str) -> list[Candle]:
+    return candles_from_df(load_ohlcv(symbol, timeframe))
+
+
+def filter_df_range(df: pd.DataFrame, start: str | None, end: str | None) -> pd.DataFrame:
+    out = df
+    if start is not None:
+        out = out[out.index >= pd.Timestamp(start, tz="UTC")]
+    if end is not None:
+        out = out[out.index <= pd.Timestamp(end, tz="UTC")]
+    return out

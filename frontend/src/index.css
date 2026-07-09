@@ -1,0 +1,294 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: #0f1419;
+  color: #e7ecf3;
+}
+
+button {
+  background: #3b82f6;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button.primary {
+  background: linear-gradient(90deg, #2563eb, #0891b2);
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  border-bottom: 1px solid #2a3441;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+th {
+  color: #9fb3c8;
+  font-weight: 600;
+}
+
+.card {
+  background: #1a2332;
+  border: 1px solid #2a3441;
+  border-radius: 10px;
+  padding: 1rem;
+}
+
+.layout {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.muted {
+  color: #9fb3c8;
+}
+
+.error {
+  color: #f87171;
+}
+
+.positive {
+  color: #4ade80;
+}
+
+.negative {
+  color: #f87171;
+}
+
+.health-banner {
+  margin: 0.75rem 0 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: #121a24;
+  font-size: 0.9rem;
+}
+
+.health-ok {
+  color: #4ade80;
+}
+
+.health-working {
+  color: #38bdf8;
+}
+
+.health-stalled {
+  color: #fbbf24;
+}
+
+.health-dead {
+  color: #f87171;
+}
+
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
+.live-panel {
+  margin-bottom: 1rem;
+}
+
+.live-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.pulse {
+  color: #4ade80;
+  font-size: 0.85rem;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.progress-track {
+  height: 10px;
+  background: #2a3441;
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 0.75rem;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #22d3ee);
+  transition: width 0.3s ease;
+}
+
+.live-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 1rem;
+}
+
+@media (max-width: 800px) {
+  .live-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.feed {
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.feed-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 0.8fr;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  background: #121a24;
+}
+
+.feed-row.skip {
+  border-left: 3px solid #94a3b8;
+  opacity: 0.85;
+}
+
+.feed-row.ok {
+  border-left: 3px solid #4ade80;
+}
+
+.feed-row.fail {
+  border-left: 3px solid #f87171;
+}
+
+h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  color: #9fb3c8;
+}
+
+.tab-nav {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.tab {
+  background: #1a2332;
+  color: #9fb3c8;
+  border: 1px solid #2a3441;
+}
+
+.tab.active {
+  background: #2563eb;
+  color: white;
+  border-color: #2563eb;
+}
+
+.paper-panel,
+.revalidate-panel {
+  margin-bottom: 1rem;
+}
+
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.75rem;
+}
+
+.form-row select,
+.form-row input,
+.text-input {
+  background: #121a24;
+  border: 1px solid #2a3441;
+  color: #e7ecf3;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+
+.text-input {
+  display: block;
+  width: 100%;
+  margin: 0.35rem 0;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+}
+
+.inline-label {
+  display: flex;
+  align-items: center;
+  font-size: 0.85rem;
+  color: #9fb3c8;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.reason-list {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+  color: #9fb3c8;
+}
+
+code {
+  font-size: 0.85em;
+  background: #121a24;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}

@@ -1,367 +1,572 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Callable
 
-from borex.backtest.costs import TradeCosts, apply_entry_fill, apply_exit_fill, infer_pip_size
-from borex.backtest.portfolio import Portfolio, PositionSide, Trade
-from borex.models.candle import Candle, Signal, SignalAction
-from borex.strategy.base import Strategy
+import pandas as pd
 
-if TYPE_CHECKING:
-    from borex.data.mtf import MultiTimeframeContext
-
-
-@dataclass
-class BacktestConfig:
-    initial_capital: float = 10_000.0
-    position_size_pct: float = 1.0
-    leverage: float = 1.0
-    maintenance_margin_ratio: float = 0.0  # stop-out: equity <= margin × ratio
-    inversed: bool = False
-    stop_loss_pct: float | None = 0.02  # 2% stop loss
-    take_profit_pct: float | None = 0.04  # 4% take profit
-    close_on_opposite_signal: bool = True
-    spread_pips: float = 0.0
-    slippage_pips: float = 0.0
-    commission_per_trade: float = 0.0
-    pip_size: float | None = None  # auto desde símbolo si None
+from borex.backtest.costs import CostModel
+from borex.backtest.execution import ExitReason, adverse_price, check_exits
+from borex.backtest.fills import PendingEntry, fill_signal_price, schedule_entry
+from borex.backtest.metrics import BacktestMetrics, compute_metrics
+from borex.backtest.portfolio import Portfolio, Trade
+from borex.backtest.reconcile import finalize_execution_stats
+from borex.backtest.risk import RiskTracker
+from borex.config import BacktestConfig
+from borex.data.mtf import build_htf_alignment, filter_df_range, tf_minutes
+from borex.data.store import load_ohlcv
+from borex.models.signal import Candle, SignalAction
+from borex.strategy.base import Strategy, StrategyContext, candles_from_df
+from borex.strategy.indicators import pd_day
+from borex.strategy.mtf import MtfContext, is_mtf_strategy
 
 
 @dataclass
 class BacktestResult:
-    strategy_name: str
+    strategy: str
     symbol: str
     timeframe: str
-    config: BacktestConfig
-    trades: list[Trade]
-    final_equity: float
-    total_return_pct: float
-    win_rate: float
-    total_trades: int
-    winning_trades: int
-    losing_trades: int
-    max_drawdown_pct: float
-    filter_intervals: list[str] | None = None
-    total_commission: float = 0.0
+    params: dict
+    metrics: BacktestMetrics
     equity_curve: list[float] = field(default_factory=list)
+    trades: list[Trade] = field(default_factory=list)
+    split: str = "full"
+    mtf_bias: list[str] = field(default_factory=list)
+    risk_stats: dict = field(default_factory=dict)
+    execution_stats: dict = field(default_factory=dict)
 
-    def summary(self) -> str:
-        tf = self.timeframe
-        if self.filter_intervals:
-            filt = "+".join(self.filter_intervals)
-            tf = f"{self.timeframe} (filtro: {filt})"
-        lines = [
-            f"Estrategia: {self.strategy_name}",
-            f"Símbolo: {self.symbol} ({tf})",
-            f"Capital inicial: ${self.config.initial_capital:,.2f}",
-            f"Apalancamiento: {self.config.leverage:g}x",
-            f"Invertido: {'sí' if self.config.inversed else 'no'}",
-            f"Capital final: ${self.final_equity:,.2f}",
-            f"Retorno total: {self.total_return_pct:.2%}",
-            f"Max drawdown: {self.max_drawdown_pct:.2%}",
-            f"Trades: {self.total_trades} (W: {self.winning_trades} / L: {self.losing_trades})",
-            f"Win rate: {self.win_rate:.2%}",
-        ]
-        if (
-            self.config.spread_pips
-            or self.config.slippage_pips
-            or self.config.commission_per_trade
-        ):
-            lines.append(
-                f"Costos: spread {self.config.spread_pips:g} pips | "
-                f"slippage {self.config.slippage_pips:g} pips | "
-                f"comisión ${self.config.commission_per_trade:.2f}/trade"
+    def to_dict(self) -> dict:
+        out = {
+            "strategy": self.strategy,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "params": self.params,
+            "split": self.split,
+            "metrics": self.metrics.to_dict(),
+        }
+        if self.mtf_bias:
+            out["mtf_bias"] = self.mtf_bias
+        if self.risk_stats:
+            out["risk_stats"] = self.risk_stats
+        if self.execution_stats:
+            out["execution_stats"] = self.execution_stats
+        return out
+
+
+@dataclass
+class EngineState:
+    portfolio: Portfolio
+    risk: RiskTracker
+    pending: list[PendingEntry] = field(default_factory=list)
+    equity_curve: list[float] = field(default_factory=list)
+    last_index: int = -1
+
+
+_BARS_PER_YEAR = {
+    "1m": 365 * 24 * 60,
+    "15m": 365 * 24 * 4,
+    "30m": 365 * 24 * 2,
+    "1h": 365 * 24,
+    "4h": 365 * 6,
+    "1d": 365,
+    "1wk": 52,
+}
+
+
+def _validate_mtf(entry_tf: str, bias_tfs: tuple[str, ...]) -> None:
+    entry_m = tf_minutes(entry_tf)
+    for tf in bias_tfs:
+        if tf_minutes(tf) <= entry_m:
+            raise ValueError(
+                f"MTF bias timeframe {tf} must be higher than entry timeframe {entry_tf}"
             )
-            lines.append(f"Comisión total pagada: ${self.total_commission:,.2f}")
-        return "\n".join(lines)
 
 
 class BacktestEngine:
-    def __init__(self, strategy: Strategy, config: BacktestConfig | None = None):
-        self.strategy = strategy
-        self.config = config or BacktestConfig()
-        self._costs: TradeCosts | None = None
-        self._total_commission: float = 0.0
+    DecisionHandler = Callable[[dict], None]
 
-    def _trade_costs(self, symbol: str) -> TradeCosts:
-        pip = self.config.pip_size or infer_pip_size(symbol)
-        return TradeCosts(
-            spread_pips=self.config.spread_pips,
-            slippage_pips=self.config.slippage_pips,
-            commission_per_trade=self.config.commission_per_trade,
-            pip_size=pip,
-        )
-
-    def _fill_entry(self, mid_price: float, side) -> float:
-        assert self._costs is not None
-        return apply_entry_fill(mid_price, side, self._costs)
-
-    def _fill_exit(self, mid_price: float, side) -> float:
-        assert self._costs is not None
-        return apply_exit_fill(mid_price, side, self._costs)
-
-    def _close_with_costs(
+    def __init__(
         self,
-        portfolio: Portfolio,
-        index: int,
-        mid_price: float,
-        timestamp: object,
-        reason: str,
+        config: BacktestConfig | None = None,
+        *,
+        decision_handler: DecisionHandler | None = None,
     ) -> None:
-        trade = portfolio.open_trade
-        if trade is None:
-            return
-        fill = self._fill_exit(mid_price, trade.side)
-        portfolio.close_position(index, fill, timestamp, reason)
-        commission = self.config.commission_per_trade
-        if commission > 0 and portfolio.closed_trades:
-            closed = portfolio.closed_trades[-1]
-            closed.commission = commission
-            portfolio.charge_commission(commission)
-            self._total_commission += commission
+        self.config = config or BacktestConfig()
+        self.costs = CostModel.from_config(self.config)
+        self.decision_handler = decision_handler
+        self._min_log_bar: int = 0
 
-    def run(
+    def set_decision_context(
         self,
-        candles: list[Candle],
-        symbol: str = "UNKNOWN",
-        timeframe: str = "1d",
-        mtf: MultiTimeframeContext | None = None,
-    ) -> BacktestResult:
-        self._costs = self._trade_costs(symbol)
-        self._total_commission = 0.0
-        portfolio = Portfolio(
-            initial_capital=self.config.initial_capital,
-            position_size_pct=self.config.position_size_pct,
-            leverage=self.config.leverage,
-            maintenance_margin_ratio=self.config.maintenance_margin_ratio,
+        handler: DecisionHandler | None,
+        *,
+        min_bar_index: int = 0,
+    ) -> None:
+        self.decision_handler = handler
+        self._min_log_bar = min_bar_index
+
+    def _log_decision(self, bar_index: int, bar_ts: object, **fields: object) -> None:
+        if not self.decision_handler or bar_index < self._min_log_bar:
+            return
+        self.decision_handler(
+            {
+                "bar_index": bar_index,
+                "bar_ts": str(bar_ts),
+                **fields,
+            }
         )
-        equity_curve: list[float] = [portfolio.equity]
-        peak_equity = portfolio.equity
-        max_dd = 0.0
 
-        for i in range(len(candles)):
-            if portfolio.liquidated:
-                break
+    def _needs_pending_fills(self) -> bool:
+        return self.config.fill_mode == "next_open" or self.config.entry_delay_bars > 0
 
-            candle = candles[i]
-
-            # Gestionar liquidación / stop loss / take profit en la vela actual
-            if portfolio.open_trade is not None:
-                closed = self._check_exit_levels(portfolio, i, candle)
-                eq_close, eq_worst = self._equity_snapshot(portfolio, candle)
-                equity_curve.append(eq_close)
-                peak_equity, max_dd = self._update_drawdown(
-                    peak_equity, max_dd, eq_close, eq_worst
+    def _execute_pending(
+        self,
+        i: int,
+        c: Candle,
+        candles: list[Candle],
+        portfolio: Portfolio,
+        risk: RiskTracker,
+        pending: list[PendingEntry],
+        symbol: str,
+    ) -> None:
+        due = [p for p in pending if p.execute_index == i]
+        for p in due:
+            if not risk.can_enter():
+                self._log_decision(
+                    i, c.timestamp,
+                    event_type="block",
+                    action=p.action.value,
+                    reason=risk.stats.halt_reason or "halted",
                 )
-                if closed or portfolio.liquidated:
-                    continue
+                continue
+            if not risk.allows_correlation(portfolio.open_trades, p.symbol, p.action):
+                self._log_decision(
+                    i, c.timestamp,
+                    event_type="block",
+                    action=p.action.value,
+                    reason="correlation_limit",
+                )
+                continue
+            signal_price = fill_signal_price(
+                i,
+                config=self.config,
+                open_price=c.open,
+                close_price=c.close,
+            )
+            if self.config.fill_mode == "next_open":
+                signal_price = c.open
+            else:
+                signal_price = c.close
+            side = "long" if p.action == SignalAction.BUY else "short"
+            entry_px = self.costs.entry_price(
+                side, signal_price, candles=candles, index=i
+            )
+            opened = portfolio.open_position(
+                p.action,
+                i,
+                entry_px,
+                c.timestamp,
+                p.tag,
+                stop_loss=p.stop_loss,
+                take_profit=p.take_profit,
+                size_pct=p.size_pct,
+                symbol=p.symbol,
+                signal_entry_price=signal_price,
+            )
+            if opened:
+                self.costs.charge_open(
+                    portfolio,
+                    opened,
+                    signal_price=signal_price,
+                    candles=candles,
+                    index=i,
+                )
+                self._log_decision(
+                    i, c.timestamp,
+                    event_type="entry",
+                    action=p.action.value,
+                    reason="pending_fill",
+                    detail={"trade_id": opened.id, "price": opened.entry_price, "tag": p.tag},
+                )
+        pending[:] = [p for p in pending if p.execute_index > i]
 
-            signal = self.strategy.on_bar(i, candles, mtf)
-            if signal is None:
-                eq_close, eq_worst = self._equity_snapshot(portfolio, candle)
-                equity_curve.append(eq_close)
-                peak_equity, max_dd = self._update_drawdown(
-                    peak_equity, max_dd, eq_close, eq_worst
+    def _process_bar(
+        self,
+        i: int,
+        candles: list[Candle],
+        *,
+        portfolio: Portfolio,
+        risk: RiskTracker,
+        pending: list[PendingEntry],
+        strategy: Strategy,
+        symbol: str,
+        timeframe: str,
+        bias_tfs: tuple[str, ...],
+        htf_candles: dict[str, list],
+        align: dict[str, list[int]],
+    ) -> None:
+        c = candles[i]
+        day = pd_day(c.timestamp)
+        eq = portfolio.equity
+        was_halted = risk.stats.halted
+        risk.on_bar(eq, day)
+        if not was_halted and risk.stats.halted:
+            self._log_decision(
+                i, c.timestamp,
+                event_type="halt",
+                reason=risk.stats.halt_reason,
+            )
+        portfolio.halted = risk.stats.halted
+
+        self._execute_pending(i, c, candles, portfolio, risk, pending, symbol)
+
+        exits = check_exits(portfolio.open_trades, i, c.low, c.high)
+        trade_map = {t.id: t for t in portfolio.open_trades}
+        for ev in exits:
+            trade = trade_map.get(ev.trade_id)
+            if trade is None:
+                continue
+            px = self.costs.charge_close(
+                portfolio, trade, ev.price, candles=candles, index=i
+            )
+            portfolio.close_position(trade, i, px, c.timestamp, reason=ev.reason.value)
+            self._log_decision(
+                i, c.timestamp,
+                event_type="exit",
+                action=trade.side.value,
+                reason=ev.reason.value,
+                detail={"trade_id": trade.id, "price": px, "pnl": trade.pnl},
+            )
+
+        for trade in list(portfolio.open_trades):
+            if trade.entry_index == i:
+                continue
+            adv = adverse_price(trade, c.low, c.high)
+            eq = portfolio.equity_at({t.id: adverse_price(t, c.low, c.high) for t in portfolio.open_trades})
+            threshold = trade.margin * portfolio.maintenance_margin_ratio
+            if eq <= threshold:
+                px = self.costs.charge_close(
+                    portfolio, trade, adv, candles=candles, index=i
+                )
+                portfolio.close_position(
+                    trade, i, px, c.timestamp, reason=ExitReason.LIQUIDATION.value
+                )
+                self._log_decision(
+                    i, c.timestamp,
+                    event_type="exit",
+                    action=trade.side.value,
+                    reason=ExitReason.LIQUIDATION.value,
+                    detail={"trade_id": trade.id, "price": px},
+                )
+
+        if portfolio.liquidated:
+            return
+
+        mtf_ctx = None
+        if bias_tfs:
+            mtf_ctx = MtfContext(i, candles, htf_candles, align)
+
+        ctx = StrategyContext(
+            symbol=symbol,
+            timeframe=timeframe,
+            open_trades=len(portfolio.open_trades),
+            mtf=mtf_ctx,
+        )
+        signals = strategy.on_bar(i, candles, ctx)
+        for sig in signals:
+            self._log_decision(
+                i, c.timestamp,
+                event_type="signal",
+                action=sig.action.value,
+                reason=sig.tag or "strategy",
+                detail={
+                    "stop_loss": sig.stop_loss,
+                    "take_profit": sig.take_profit,
+                    "size_pct": sig.size_pct,
+                },
+            )
+            if sig.action == SignalAction.CLOSE:
+                for trade in list(portfolio.open_trades):
+                    px = self.costs.charge_close(
+                        portfolio, trade, c.close, candles=candles, index=i
+                    )
+                    portfolio.close_position(
+                        trade, i, px, c.timestamp, reason=ExitReason.SIGNAL.value
+                    )
+                    self._log_decision(
+                        i, c.timestamp,
+                        event_type="exit",
+                        action=trade.side.value,
+                        reason=ExitReason.SIGNAL.value,
+                        detail={"trade_id": trade.id, "price": px, "pnl": trade.pnl},
+                    )
+                continue
+
+            if not risk.can_enter():
+                self._log_decision(
+                    i, c.timestamp,
+                    event_type="block",
+                    action=sig.action.value,
+                    reason=risk.stats.halt_reason or "halted",
+                )
+                continue
+            if not risk.allows_correlation(portfolio.open_trades, symbol, sig.action):
+                self._log_decision(
+                    i, c.timestamp,
+                    event_type="block",
+                    action=sig.action.value,
+                    reason="correlation_limit",
                 )
                 continue
 
-            self._handle_signal(portfolio, signal, i, candles)
-            eq_close, eq_worst = self._equity_snapshot(portfolio, candle)
-            equity_curve.append(eq_close)
-            peak_equity, max_dd = self._update_drawdown(
-                peak_equity, max_dd, eq_close, eq_worst
+            size_pct = risk.compute_size_pct(
+                sig, candles, i, portfolio.equity, portfolio.closed_trades
             )
 
-        # Cerrar posición abierta al final del backtest
-        if portfolio.open_trade is not None:
-            last = candles[-1]
-            self._close_with_costs(
-                portfolio,
-                len(candles) - 1,
-                last.close,
-                last.timestamp,
-                "end_of_data",
+            if self._needs_pending_fills():
+                entry = schedule_entry(
+                    i,
+                    sig,
+                    symbol=symbol,
+                    size_pct=size_pct,
+                    signal_price=c.close,
+                    config=self.config,
+                    bar_count=len(candles),
+                )
+                if entry:
+                    pending.append(entry)
+                    self._log_decision(
+                        i, c.timestamp,
+                        event_type="pending",
+                        action=sig.action.value,
+                        reason="scheduled",
+                        detail={"execute_index": entry.execute_index},
+                    )
+                continue
+
+            signal_price = c.close
+            side = "long" if sig.action == SignalAction.BUY else "short"
+            entry_px = self.costs.entry_price(
+                side, signal_price, candles=candles, index=i
             )
+            opened = portfolio.open_position(
+                sig.action,
+                i,
+                entry_px,
+                c.timestamp,
+                sig.tag,
+                stop_loss=sig.stop_loss,
+                take_profit=sig.take_profit,
+                size_pct=size_pct,
+                symbol=symbol,
+                signal_entry_price=signal_price,
+            )
+            if opened:
+                self.costs.charge_open(
+                    portfolio,
+                    opened,
+                    signal_price=signal_price,
+                    candles=candles,
+                    index=i,
+                )
+                self._log_decision(
+                    i, c.timestamp,
+                    event_type="entry",
+                    action=sig.action.value,
+                    reason=sig.tag or "fill",
+                    detail={"trade_id": opened.id, "price": opened.entry_price},
+                )
+
+    def run(
+        self,
+        strategy: Strategy,
+        df: pd.DataFrame,
+        *,
+        symbol: str = "",
+        timeframe: str = "1h",
+        split: str = "full",
+        htf_dfs: dict[str, pd.DataFrame] | None = None,
+        state: EngineState | None = None,
+        start_index: int | None = None,
+        end_index: int | None = None,
+    ) -> BacktestResult:
+        candles = candles_from_df(df)
+        bias_tfs: tuple[str, ...] = ()
+        htf_candles: dict[str, list] = {}
+        align: dict[str, list[int]] = {}
+
+        if is_mtf_strategy(type(strategy)):
+            spec = strategy.mtf_spec()
+            bias_tfs = spec.bias_timeframes
+            _validate_mtf(timeframe, bias_tfs)
+            for tf in bias_tfs:
+                hdf = (htf_dfs or {}).get(tf)
+                if hdf is None:
+                    hdf = load_ohlcv(symbol, tf)
+                htf_candles[tf] = candles_from_df(hdf)
+                align[tf] = build_htf_alignment(candles, htf_candles[tf], tf)
+
+        warmup = strategy.warmup_bars()
+        if state:
+            portfolio = state.portfolio
+            risk = state.risk
+            pending = state.pending
+            equity_curve = state.equity_curve
+            if start_index is not None:
+                bar_start = start_index
+            elif state.last_index < 0:
+                bar_start = warmup
+            else:
+                bar_start = state.last_index + 1
+        else:
+            portfolio = Portfolio(
+                initial_capital=self.config.initial_capital,
+                leverage=self.config.leverage,
+                position_size_pct=self.config.position_size_pct,
+                max_positions=self.config.max_positions,
+                maintenance_margin_ratio=self.config.maintenance_margin_ratio,
+            )
+            risk = RiskTracker(self.config)
+            risk.peak_equity = self.config.initial_capital
+            risk.day_start_equity = self.config.initial_capital
+            pending = []
+            equity_curve = []
+            bar_start = start_index if start_index is not None else warmup
+
+        bar_end = end_index if end_index is not None else len(candles)
+
+        for i in range(bar_start, bar_end):
+            self._process_bar(
+                i,
+                candles,
+                portfolio=portfolio,
+                risk=risk,
+                pending=pending,
+                strategy=strategy,
+                symbol=symbol,
+                timeframe=timeframe,
+                bias_tfs=bias_tfs,
+                htf_candles=htf_candles,
+                align=align,
+            )
+            if portfolio.liquidated:
+                equity_curve.append(0.0)
+                break
             equity_curve.append(portfolio.equity)
 
-        return self._build_result(
-            portfolio, equity_curve, max_dd, symbol, timeframe, mtf
+        if state:
+            state.last_index = bar_end - 1 if bar_end > 0 else state.last_index
+            state.pending = pending
+            state.equity_curve = equity_curve
+
+        bpy = _BARS_PER_YEAR.get(timeframe, 365 * 24)
+        bars_processed = max(0, (bar_end - bar_start) if not portfolio.liquidated else len(equity_curve))
+        metrics = compute_metrics(
+            portfolio,
+            equity_curve,
+            bars_processed or len(candles) - warmup,
+            bars_per_year=bpy,
         )
-
-    def _equity_snapshot(
-        self, portfolio: Portfolio, candle: Candle
-    ) -> tuple[float, float]:
-        eq_close = self._mark_equity(portfolio, candle)
-        if portfolio.open_trade is None:
-            return eq_close, eq_close
-        eq_worst = portfolio.equity_at_adverse(candle.low, candle.high)
-        return eq_close, eq_worst
-
-    @staticmethod
-    def _update_drawdown(
-        peak: float, max_dd: float, eq_close: float, eq_worst: float
-    ) -> tuple[float, float]:
-        peak = max(peak, eq_close)
-        if peak > 0:
-            max_dd = max(max_dd, (peak - eq_worst) / peak)
-        return peak, max_dd
-
-    def _effective_action(self, action: SignalAction) -> SignalAction:
-        if not self.config.inversed or action == SignalAction.HOLD:
-            return action
-        if action == SignalAction.BUY:
-            return SignalAction.SELL
-        return SignalAction.BUY
-
-    def _handle_signal(
-        self,
-        portfolio: Portfolio,
-        signal: Signal,
-        index: int,
-        candles: list[Candle],
-    ) -> None:
-        # Ejecutar en la apertura de la siguiente vela (evita look-ahead bias)
-        if index + 1 >= len(candles):
-            return
-
-        next_candle = candles[index + 1]
-        mid_price = next_candle.open
-        exec_index = index + 1
-        action = self._effective_action(signal.action)
-
-        if portfolio.open_trade is not None and self.config.close_on_opposite_signal:
-            current = portfolio.open_trade
-            is_opposite = (
-                current.side.value == "long" and action == SignalAction.SELL
-            ) or (
-                current.side.value == "short" and action == SignalAction.BUY
-            )
-            if is_opposite:
-                self._close_with_costs(
-                    portfolio,
-                    exec_index,
-                    mid_price,
-                    next_candle.timestamp,
-                    "opposite_signal",
-                )
-
-        if portfolio.can_open() and action != SignalAction.HOLD:
-            side = PositionSide.LONG if action == SignalAction.BUY else PositionSide.SHORT
-            exec_price = self._fill_entry(mid_price, side)
-            stop_loss = signal.stop_loss
-            take_profit = signal.take_profit
-            if (
-                self.config.inversed
-                and stop_loss is not None
-                and take_profit is not None
-            ):
-                stop_loss, take_profit = take_profit, stop_loss
-            portfolio.open_position(
-                action,
-                exec_index,
-                exec_price,
-                next_candle.timestamp,
-                signal.pattern,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                score=signal.score,
-            )
-
-    def _mark_equity(self, portfolio: Portfolio, candle: Candle) -> float:
-        if portfolio.open_trade is None:
-            return portfolio.equity
-        return portfolio.equity_at(candle.close)
-
-    def _check_exit_levels(
-        self, portfolio: Portfolio, index: int, candle: Candle
-    ) -> bool:
-        trade = portfolio.open_trade
-        if trade is None:
-            return False
-
-        liq_price = portfolio.liquidation_price()
-        adverse = portfolio.adverse_price(candle.low, candle.high)
-        if liq_price is not None and portfolio.is_margin_call_at(adverse):
-            self._close_with_costs(
-                portfolio, index, liq_price, candle.timestamp, "liquidation"
-            )
-            return True
-
-        sl = self.config.stop_loss_pct
-        tp = self.config.take_profit_pct
-
-        if trade.side.value == "long":
-            sl_price = trade.stop_loss
-            tp_price = trade.take_profit
-            if sl_price is None and sl:
-                sl_price = trade.entry_price * (1 - sl)
-            if tp_price is None and tp:
-                tp_price = trade.entry_price * (1 + tp)
-
-            if sl_price and candle.low <= sl_price:
-                self._close_with_costs(
-                    portfolio, index, sl_price, candle.timestamp, "stop_loss"
-                )
-                return True
-            if tp_price and candle.high >= tp_price:
-                self._close_with_costs(
-                    portfolio, index, tp_price, candle.timestamp, "take_profit"
-                )
-                return True
-        else:
-            sl_price = trade.stop_loss
-            tp_price = trade.take_profit
-            if sl_price is None and sl:
-                sl_price = trade.entry_price * (1 + sl)
-            if tp_price is None and tp:
-                tp_price = trade.entry_price * (1 - tp)
-
-            if sl_price and candle.high >= sl_price:
-                self._close_with_costs(
-                    portfolio, index, sl_price, candle.timestamp, "stop_loss"
-                )
-                return True
-            if tp_price and candle.low <= tp_price:
-                self._close_with_costs(
-                    portfolio, index, tp_price, candle.timestamp, "take_profit"
-                )
-                return True
-
-        return False
-
-    def _build_result(
-        self,
-        portfolio: Portfolio,
-        equity_curve: list[float],
-        max_dd: float,
-        symbol: str,
-        timeframe: str,
-        mtf: MultiTimeframeContext | None = None,
-    ) -> BacktestResult:
-        trades = portfolio.closed_trades
-        winners = [t for t in trades if t.pnl > 0]
-        losers = [t for t in trades if t.pnl <= 0]
-
-        initial = self.config.initial_capital
-        final = max(0.0, portfolio.cash)
-        total_return = (final - initial) / initial if initial else 0.0
-        win_rate = len(winners) / len(trades) if trades else 0.0
+        exec_stats = finalize_execution_stats(portfolio, self.costs.stats)
 
         return BacktestResult(
-            strategy_name=self.strategy.name,
+            strategy=strategy.name,
             symbol=symbol,
             timeframe=timeframe,
-            filter_intervals=mtf.filter_intervals if mtf else None,
-            config=self.config,
-            trades=trades,
-            final_equity=final,
-            total_return_pct=total_return,
-            win_rate=win_rate,
-            total_trades=len(trades),
-            winning_trades=len(winners),
-            losing_trades=len(losers),
-            max_drawdown_pct=max_dd,
-            total_commission=self._total_commission,
+            params=strategy.params,
+            metrics=metrics,
             equity_curve=equity_curve,
+            trades=portfolio.closed_trades,
+            split=split,
+            mtf_bias=list(bias_tfs),
+            risk_stats=risk.stats.to_dict(),
+            execution_stats=exec_stats.to_dict(),
         )
+
+    def run_incremental(
+        self,
+        strategy: Strategy,
+        df: pd.DataFrame,
+        state: EngineState,
+        *,
+        symbol: str,
+        timeframe: str,
+        htf_dfs: dict[str, pd.DataFrame] | None = None,
+    ) -> tuple[BacktestResult, EngineState]:
+        """Process only bars after state.last_index (for paper trading ticks)."""
+        candles = candles_from_df(df)
+        start = state.last_index + 1
+        if start >= len(candles):
+            bpy = _BARS_PER_YEAR.get(timeframe, 365 * 24)
+            metrics = compute_metrics(
+                state.portfolio,
+                state.equity_curve,
+                max(1, len(state.equity_curve)),
+                bars_per_year=bpy,
+            )
+            exec_stats = finalize_execution_stats(state.portfolio, self.costs.stats)
+            result = BacktestResult(
+                strategy=strategy.name,
+                symbol=symbol,
+                timeframe=timeframe,
+                params=strategy.params,
+                metrics=metrics,
+                equity_curve=state.equity_curve,
+                trades=state.portfolio.closed_trades,
+                split="paper",
+                risk_stats=state.risk.stats.to_dict(),
+                execution_stats=exec_stats.to_dict(),
+            )
+            return result, state
+
+        result = self.run(
+            strategy,
+            df,
+            symbol=symbol,
+            timeframe=timeframe,
+            split="paper",
+            htf_dfs=htf_dfs,
+            state=state,
+            start_index=start,
+        )
+        state.last_index = len(candles) - 1
+        return result, state
+
+    def warmup_state(
+        self,
+        strategy: Strategy,
+        df: pd.DataFrame,
+        *,
+        symbol: str,
+        timeframe: str,
+        htf_dfs: dict[str, pd.DataFrame] | None = None,
+    ) -> tuple[BacktestResult, EngineState]:
+        """Run full history and return engine state for incremental paper ticks."""
+        state = self.initial_state()
+        candles = candles_from_df(df)
+        if len(candles) <= strategy.warmup_bars():
+            return self.run(strategy, df, symbol=symbol, timeframe=timeframe, htf_dfs=htf_dfs), state
+        result = self.run(
+            strategy,
+            df,
+            symbol=symbol,
+            timeframe=timeframe,
+            htf_dfs=htf_dfs,
+            state=state,
+            end_index=len(candles),
+        )
+        state.last_index = len(candles) - 1
+        return result, state
+
+    def initial_state(self) -> EngineState:
+        portfolio = Portfolio(
+            initial_capital=self.config.initial_capital,
+            leverage=self.config.leverage,
+            position_size_pct=self.config.position_size_pct,
+            max_positions=self.config.max_positions,
+            maintenance_margin_ratio=self.config.maintenance_margin_ratio,
+        )
+        risk = RiskTracker(self.config)
+        risk.peak_equity = self.config.initial_capital
+        risk.day_start_equity = self.config.initial_capital
+        return EngineState(portfolio=portfolio, risk=risk)

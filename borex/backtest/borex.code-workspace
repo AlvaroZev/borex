@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../../borex-main"
+		},
+		{
+			"path": "../../../borex_nautilusEngine"
+		}
+	],
+	"settings": {}
+}
