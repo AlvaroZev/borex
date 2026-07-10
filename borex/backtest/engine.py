@@ -121,13 +121,18 @@ class BacktestResult:
         return "\n".join(lines)
 
 
+def _is_late_sl_entry(signal: Signal) -> bool:
+    """AlexG4+ late fills include ghost metadata in the pattern."""
+    return "|g:" in signal.pattern
+
+
 def _confirmation_signal_from_pattern(pattern: str) -> str:
     parts = pattern.split("|")
     if not parts:
         return "unknown"
     if parts[0] in ("alexg2",) and len(parts) >= 5:
         return parts[4]
-    if parts[0] in ("alexg3", "alexg4", "alexg5") and len(parts) >= 7:
+    if parts[0] in ("alexg3", "alexg4", "alexg5", "alexg6") and len(parts) >= 7:
         return parts[6]
     return parts[-1] if parts[-1] else "unknown"
 
@@ -135,8 +140,8 @@ def _confirmation_signal_from_pattern(pattern: str) -> str:
 def _signal_entry(
     signal: Signal, index: int, candles: list[Candle]
 ) -> tuple[int, float, object] | None:
-    """Execution bar/price for a signal (AlexG4 fills at SL on the touch bar)."""
-    if signal.pattern.startswith("alexg4|") or signal.pattern.startswith("alexg5|"):
+    """Execution bar/price for a signal (late AlexG fills at SL on the touch bar)."""
+    if _is_late_sl_entry(signal):
         if index >= len(candles):
             return None
         candle = candles[index]

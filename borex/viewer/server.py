@@ -65,7 +65,7 @@ def create_app(static_dir: Path) -> FastAPI:
         if s.analysis is None:
             raise HTTPException(
                 status_code=404,
-                detail="Analysis available only for AlexG3/AlexG4/AlexG5 multi-market sessions",
+                detail="Analysis available only for AlexG3/AlexG4/AlexG5/AlexG6 multi-market sessions",
             )
         payload = s.analysis.overview()
         payload["strategy"] = s.strategy_name
@@ -79,7 +79,7 @@ def create_app(static_dir: Path) -> FastAPI:
         if s.analysis is None or not s.candles_by_symbol:
             raise HTTPException(
                 status_code=404,
-                detail="Analysis available only for AlexG3/AlexG4/AlexG5 multi-market sessions",
+                detail="Analysis available only for AlexG3/AlexG4/AlexG5/AlexG6 multi-market sessions",
             )
         markets = []
         for sym in s.analysis.symbols:

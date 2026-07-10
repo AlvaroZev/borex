@@ -23,8 +23,11 @@ def _ts_unix(ts: object) -> int:
     return int(pd.Timestamp(ts).timestamp())
 
 
+_ALEXG_LATE = ("alexg4", "alexg5", "alexg6")
+
+
 def _parse_ghost_trade(pattern: str, trade: Trade) -> dict[str, Any] | None:
-    if not (pattern.startswith("alexg4|") or pattern.startswith("alexg5|")):
+    if not any(pattern.startswith(f"{p}|") for p in _ALEXG_LATE):
         return None
     for part in pattern.split("|"):
         if not part.startswith("g:"):
@@ -62,15 +65,16 @@ def _parse_ghost_trade(pattern: str, trade: Trade) -> dict[str, Any] | None:
 
 def _parse_alexg2_pattern(pattern: str) -> dict[str, str]:
     parts = pattern.split("|")
-    if len(parts) < 5 or parts[0] not in ("alexg2", "alexg3", "alexg4", "alexg5"):
+    if len(parts) < 5 or parts[0] not in ("alexg2", "alexg3", "alexg4", "alexg5", "alexg6"):
         return {}
+    _g3plus = ("alexg3", "alexg4", "alexg5", "alexg6")
     out = {
-        "trend": parts[3] if parts[0] in ("alexg3", "alexg4", "alexg5") else parts[1],
-        "setup": parts[4] if parts[0] in ("alexg3", "alexg4", "alexg5") else parts[2],
-        "aoi_kind": parts[5] if parts[0] in ("alexg3", "alexg4", "alexg5") else parts[3],
-        "signal": parts[6] if parts[0] in ("alexg3", "alexg4", "alexg5") else parts[4],
+        "trend": parts[3] if parts[0] in _g3plus else parts[1],
+        "setup": parts[4] if parts[0] in _g3plus else parts[2],
+        "aoi_kind": parts[5] if parts[0] in _g3plus else parts[3],
+        "signal": parts[6] if parts[0] in _g3plus else parts[4],
     }
-    if parts[0] in ("alexg3", "alexg4", "alexg5") and len(parts) > 2:
+    if parts[0] in _g3plus and len(parts) > 2:
         out["currency_bias"] = parts[2]
         out["pair"] = parts[1]
     return out
@@ -317,6 +321,23 @@ def build_trade_chart(
     }
 
     levels: list[dict[str, Any]] = []
+    levels.append(
+        {
+            "price": trade.entry_price,
+            "color": "#06b6d4",
+            "title": f"Entry {_fmt_price(trade.entry_price, precision)}",
+        }
+    )
+    if ghost is not None:
+        ghost_entry = ghost["entry_price"]
+        levels.append(
+            {
+                "price": ghost_entry,
+                "color": "#fbbf24",
+                "title": f"Ghost entry {_fmt_price(ghost_entry, precision)}",
+                "lineStyle": 2,
+            }
+        )
     if trade.stop_loss is not None:
         levels.append(
             {

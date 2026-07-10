@@ -14,6 +14,7 @@ Last updated: 2026-07-09
 | `alexg3` | `alexg2` + cross-market currency strength | Immediate signal | Currency strength + confirming pairs | Structural SL + AOI TP | Min RR with optional TP fraction | Multi-market oriented |
 | `alexg4` | `alexg3` setup logic | **Late entry**: waits for retest/touch of planned SL | Same as `alexg3` + pending invalidation rules | After fill, SL/TP are shifted from late entry | Preserves original risk/reward distances from new fill | Skips if TP hit first / SL never touched / near-miss invalidation |
 | `alexg5` | `alexg4` entry logic | Same late-entry behavior as `alexg4` | Same as `alexg4` | **Margin stop as SL** | **RR from winrate** (`RR = 1 / winrate × --rr-factor`) then TP from RR | Forces `size_mode=margin` and `true_sl=True`; `--rr-factor` default `1.0` (e.g. `1.1` = 10% wider TP) |
+| `alexg6` | `alexg5` entry + exit logic | Same late-entry as `alexg5`; **opposite signal while pending** can cancel, flip, or replace ghost | Same as `alexg5` | Same margin-stop / winrate RR as `alexg5` | Same as `alexg5` | `--second-signal`: `off` (cancel), `flip` (immediate entry new dir), `replace` (new ghost, wait for its SL) |
 | `institutional` | Institutional flow signals | Immediate signal | Strategy-specific filters | ATR/structure-oriented exits | Min RR via config | Separate non-AlexG branch |
 
 ## AlexG lineage details
@@ -35,9 +36,17 @@ Last updated: 2026-07-09
   - TP is recomputed from SL distance and dynamic RR.
 - Optional boost: `--rr-factor` (default `1.0`) multiplies the winrate RR before TP sizing.
 
+### `alexg5` -> `alexg6`
+- Keeps `alexg5` margin-stop SL and winrate-derived RR.
+- While a ghost trade waits for SL retest, if an opposite setup appears:
+  - `off` (default): cancel the pending setup (no trade).
+  - `flip`: enter immediately in the new direction (next-bar open; no ghost suffix).
+  - `replace`: discard the old ghost and queue a new ghost in the opposite direction.
+- Opposite-signal check runs before SL fill on the same bar (TP invalidation still first).
+
 ## Operational defaults by variant
 
-For `alexg5` specifically, the builders enforce:
+For `alexg5` and `alexg6`, the builders enforce:
 - `size_mode = "margin"`
 - `true_sl = True`
 - `rr_factor` from `--rr-factor` (default `1.0`)
@@ -52,6 +61,7 @@ This makes behavior deterministic regardless of CLI flags passed accidentally.
   - `borex/alexg/strategy3.py`
   - `borex/alexg/strategy4.py`
   - `borex/alexg/strategy5.py`
+  - `borex/alexg/strategy6.py`
 - Engine-level RR/SL/TP policy:
   - `borex/backtest/engine.py`
   - `borex/backtest/multi_market_engine.py`

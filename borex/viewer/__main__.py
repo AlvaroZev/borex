@@ -10,6 +10,7 @@ from borex.alexg import (
     AlexG3Strategy,
     AlexG4Strategy,
     AlexG5Strategy,
+    AlexG6Strategy,
     AlexGMethodStrategy,
 )
 from borex.alexg.multi_market import default_forex_universe, pick_master_symbol
@@ -29,6 +30,23 @@ from borex.viewer.server import create_app, set_session
 from borex.viewer.trade_store import TRADES_FILE, save_trades_csv
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def _set_terminal_title(strategy: str, port: int) -> None:
+    """Label the terminal tab with strategy + port (Cursor/VS Code + Windows)."""
+    title = f"{strategy} {port}"
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.SetConsoleTitleW(title)
+        except Exception:
+            pass
+    try:
+        sys.stdout.write(f"\033]0;{title}\007")
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 def _parse_leverage(value: str) -> float:
@@ -51,7 +69,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "institutional"],
+        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "institutional"],
         default="alexg2",
     )
     parser.add_argument("--symbol", "-s", default="EURUSD=X")
@@ -66,7 +84,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--rr-factor",
         type=float,
         default=1.0,
-        help="AlexG5: multiply dynamic RR (1/winrate). E.g. 1.1 = 10%% wider TP",
+        help="AlexG5/6: multiply dynamic RR (1/winrate). E.g. 1.1 = 10%% wider TP",
+    )
+    parser.add_argument(
+        "--second-signal",
+        choices=["off", "flip", "replace"],
+        default="off",
+        help=(
+            "AlexG6: opposite setup while waiting for SL — "
+            "off=cancel, flip=enter new direction, replace=new ghost wait"
+        ),
     )
     parser.add_argument(
         "--tp-fraction",
@@ -209,6 +236,17 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             filter_false_positives=not args.allow_false_positives,
             disabled_signals=disabled,
         )
+    if args.strategy == "alexg6":
+        return AlexG6Strategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+            second_signal=args.second_signal,
+        )
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
             min_score=args.min_score,
@@ -231,9 +269,9 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         true_sl_rr=args.min_rr,
         rr_factor=args.rr_factor,
     )
-    if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "institutional"):
-        if args.strategy == "alexg5":
-            # AlexG5 always uses margin stop as SL and winrate-derived RR for TP.
+    if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "institutional"):
+        if args.strategy in ("alexg5", "alexg6"):
+            # AlexG5/6 always use margin stop as SL and winrate-derived RR for TP.
             base["size_mode"] = "margin"
             base["true_sl"] = True
             base["rr_factor"] = args.rr_factor
@@ -244,7 +282,7 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
 def run_session(args: argparse.Namespace) -> ViewerSession:
     cache_mode = _cache_mode(args)
 
-    if args.strategy in ("alexg3", "alexg4", "alexg5"):
+    if args.strategy in ("alexg3", "alexg4", "alexg5", "alexg6"):
         load_path = Path(args.load_analysis) if args.load_analysis else None
         if args.analysis_only and not load_path:
             raise RuntimeError("--analysis-only requires --load-analysis DIR")
@@ -443,6 +481,7 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    _set_terminal_title(args.strategy, args.port)
     try:
         session = run_session(args)
     except Exception as exc:

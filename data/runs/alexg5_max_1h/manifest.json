@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "saved_at": "2026-07-10T00:34:34.724915+00:00",
+  "strategy": "alexg5",
+  "timeframe": "1h",
+  "master_symbol": "EURUSD=X",
+  "symbols": [
+    "AUDUSD=X",
+    "EURGBP=X",
+    "EURJPY=X",
+    "EURUSD=X",
+    "GBPJPY=X",
+    "GBPUSD=X",
+    "NZDUSD=X",
+    "USDCAD=X",
+    "USDCHF=X",
+    "USDJPY=X"
+  ],
+  "bar_counts": {
+    "EURUSD=X": 17215,
+    "GBPUSD=X": 17217,
+    "USDJPY=X": 17120,
+    "AUDUSD=X": 17315,
+    "USDCAD=X": 17315,
+    "USDCHF=X": 17159,
+    "NZDUSD=X": 17306,
+    "EURGBP=X": 17243,
+    "EURJPY=X": 17235,
+    "GBPJPY=X": 17223
+  },
+  "date_ranges": {
+    "EURUSD=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-03T21:00:00+00:00"
+    },
+    "GBPUSD=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-03T21:00:00+00:00"
+    },
+    "USDJPY=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-06T00:00:00+00:00"
+    },
+    "AUDUSD=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-03T21:00:00+00:00"
+    },
+    "USDCAD=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-03T21:00:00+00:00"
+    },
+    "USDCHF=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-03T20:00:00+00:00"
+    },
+    "NZDUSD=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-03T21:00:00+00:00"
+    },
+    "EURGBP=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-06T00:00:00+00:00"
+    },
+    "EURJPY=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-06T06:00:00+00:00"
+    },
+    "GBPJPY=X": {
+      "start": "2023-09-18T23:00:00+00:00",
+      "end": "2026-07-03T21:00:00+00:00"
+    }
+  },
+  "timeline_start": 1695078000,
+  "timeline_end": 1783112400,
+  "timeline_bars": 17215,
+  "total_decisions": 472,
+  "files": {
+    "decisions": "decisions.csv",
+    "candles": "candles.csv",
+    "aoi": "aoi.csv",
+    "timeline": "timeline.csv",
+    "trades": "trades.csv"
+  },
+  "period": "max",
+  "trades_file": "trades.csv"
+}
