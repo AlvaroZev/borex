@@ -1,0 +1,33 @@
+# Deploy host compose for alexg5 live.
+# Default image tag comes from Drone (ci-cd). Override with:
+#   $env:BOREX_DOCKER_REPO="your/repo"; $env:BOREX_DOCKER_TAG="ci-cd"
+#
+# For real MT5 trading on Windows, prefer restart-live.ps1 native mode.
+# This compose file is mainly for pulling the CI-built image and running
+# dry-run / dashboard packaging; live MT5 needs Windows Python + terminal.
+
+services:
+  alexg5-live:
+    image: ${BOREX_DOCKER_REPO:-borex/alexg5-live}:${BOREX_DOCKER_TAG:-ci-cd}
+    container_name: alexg5-live
+    restart: unless-stopped
+    env_file:
+      - borex_live/.env
+    environment:
+      BOREX_MAIN_ROOT: /app
+    ports:
+      - "${BOREX_LIVE_PORT:-8790}:8790"
+    command:
+      - python
+      - mt5service.py
+      - --demo
+      - --strategy
+      - alexg5
+      - --leverage
+      - "5000"
+      - --rr-factor
+      - "2.5"
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8790"
