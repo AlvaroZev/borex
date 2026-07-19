@@ -137,8 +137,14 @@ def _run_npx(
             cmd = subprocess.list2cmdline(cmd)
         result = subprocess.run(cmd, **run_kwargs)
         if result.returncode != 0:
-            err = (result.stderr or result.stdout or "dukascopy-node failed").strip()
-            raise RuntimeError(err[:500])
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+            err = stdout if stdout else stderr
+            if stdout and stderr and "fetch failed" in stdout.lower():
+                err = f"{stdout}\n{stderr}"
+            elif not err:
+                err = "dukascopy-node failed"
+            raise RuntimeError(err[:800])
 
         csv_path = _find_csv(instrument, tf_token, start, end, out_dir)
         if not csv_path:

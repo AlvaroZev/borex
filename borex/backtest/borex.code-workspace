@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../../../borex_nautilusEngine"
+		},
+		{
+			"path": "../../../borex_live"
 		}
 	],
 	"settings": {}

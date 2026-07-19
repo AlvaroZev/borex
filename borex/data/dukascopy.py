@@ -62,13 +62,14 @@ def load_dukascopy_csv(path: str | Path) -> pd.DataFrame:
     if not ts_col:
         raise ValueError(f"No timestamp column in {path}")
 
-    out = pd.DataFrame()
-    out.index = pd.to_datetime(df[ts_col], unit="ms", utc=True)
+    out = pd.DataFrame(index=pd.to_datetime(df[ts_col], unit="ms", utc=True))
     for src, dst in [("open", "Open"), ("high", "High"), ("low", "Low"), ("close", "Close")]:
         if src in cols:
-            out[dst] = df[cols[src]].astype(float)
+            # Use .to_numpy() — assigning a RangeIndex Series into a DatetimeIndex
+            # frame aligns on labels and fills everything with NaN.
+            out[dst] = df[cols[src]].astype(float).to_numpy()
     if "volume" in cols:
-        out["Volume"] = df[cols["volume"]].astype(float)
+        out["Volume"] = df[cols["volume"]].astype(float).to_numpy()
     return out.sort_index()
 
 
