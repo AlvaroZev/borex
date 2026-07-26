@@ -31,8 +31,12 @@ def build_strategy_registry() -> dict[str, StrategySpec]:
         AlexG3Strategy,
         AlexG4Strategy,
         AlexG5Strategy,
+        AlexG5RevisedStrategy,
         AlexG6Strategy,
+        AlexG7Strategy,
+        AlexG8Strategy,
     )
+    from borex.alexg.ablation import video1_default, video2_winner
 
     def g3(**kw):
         return AlexG3Strategy(**_ghost_kw(kw))
@@ -43,17 +47,46 @@ def build_strategy_registry() -> dict[str, StrategySpec]:
     def g5(**kw):
         return AlexG5Strategy(**_ghost_kw(kw))
 
+    def g5r(**kw):
+        preset = kw.get("ablation_preset", "video1")
+        abl = video2_winner() if preset == "video2" else video1_default()
+        return AlexG5RevisedStrategy(
+            min_rr=kw.get("min_rr", 3.0),
+            ablation=abl,
+            execution_interval=kw.get("execution_interval", "1h"),
+        )
+
     def g6(**kw):
         return AlexG6Strategy(
             **_ghost_kw(kw),
             second_signal=kw.get("second_signal", "off"),
         )
 
+    def g7(**kw):
+        return AlexG7Strategy(
+            min_rr=kw.get("min_rr", 3.0),
+            execution_interval=kw.get("execution_interval", "1h"),
+        )
+
+    def g8(**kw):
+        intervals = kw.get("ltf_intervals", ("1m",))
+        if isinstance(intervals, str):
+            intervals = tuple(intervals.split(","))
+        return AlexG8Strategy(
+            min_rr=kw.get("min_rr", 3.0),
+            execution_interval=kw.get("execution_interval", "1h"),
+            ltf_intervals=tuple(intervals),
+            ltf_confirm_mode=kw.get("ltf_confirm_mode", "any"),
+        )
+
     return {
         "alexg3": StrategySpec("alexg3", EntryMode.IMMEDIATE, g3),
         "alexg4": StrategySpec("alexg4", EntryMode.GHOST, g4),
         "alexg5": StrategySpec("alexg5", EntryMode.GHOST, g5),
+        "alexg5revised": StrategySpec("alexg5revised", EntryMode.GHOST, g5r),
         "alexg6": StrategySpec("alexg6", EntryMode.GHOST, g6),
+        "alexg7": StrategySpec("alexg7", EntryMode.GHOST, g7),
+        "alexg8": StrategySpec("alexg8", EntryMode.GHOST, g8),
     }
 
 

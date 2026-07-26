@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Restart alexg5 live after Drone deploys the ci-cd branch.
+  Restart alexg live after Drone deploys the ci-cd branch.
 
 .DESCRIPTION
   Modes (env BOREX_DEPLOY_MODE):
@@ -22,8 +22,8 @@ $LiveRoot = Join-Path $RepoRoot "deploy\borex_live"
 $ComposeFile = Join-Path $RepoRoot "deploy\docker-compose.yml"
 $Mode = if ($env:BOREX_DEPLOY_MODE) { $env:BOREX_DEPLOY_MODE.ToLowerInvariant() } else { "native" }
 $LogDir = Join-Path $LiveRoot "logs"
-$PidFile = Join-Path $LogDir "alexg5-live.pid"
-$OutLog = Join-Path $LogDir "alexg5-live.out.log"
+$PidFile = Join-Path $LogDir "alexg-live.pid"
+$OutLog = Join-Path $LogDir "alexg-live.out.log"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -33,7 +33,7 @@ function Stop-NativeService {
         if ($oldPid) {
             $proc = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
             if ($proc) {
-                Write-Host "Stopping native alexg5-live PID $oldPid"
+                Write-Host "Stopping native alexg-live PID $oldPid"
                 Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 2
             }
@@ -41,7 +41,7 @@ function Stop-NativeService {
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine -match "mt5service\.py" -and $_.CommandLine -match "alexg5" } |
+        Where-Object { $_.CommandLine -and $_.CommandLine -match "mt5service\.py" -and $_.CommandLine -match "alexg[578]" } |
         ForEach-Object {
             Write-Host "Stopping leftover mt5service.py PID $($_.ProcessId)"
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -69,18 +69,23 @@ function Start-NativeService {
     }
 
     $env:BOREX_MAIN_ROOT = "$RepoRoot"
+    $strategy = if ($env:BOREX_LIVE_STRATEGY) { $env:BOREX_LIVE_STRATEGY } else { "alexg7" }
     $argList = @(
         "mt5service.py",
         "--demo",
-        "--strategy", "alexg5",
+        "--strategy", $strategy,
         "--leverage", "5000",
         "--rr-factor", "2.5",
+        "--min-rr", "3.0",
         "--host", "127.0.0.1",
         "--port", "8790"
     )
+    if ($strategy -eq "alexg8") {
+        $argList += @("--ltf-intervals", "1m", "--ltf-confirm-mode", "any")
+    }
 
-    $ErrLog = Join-Path $LogDir "alexg5-live.err.log"
-    Write-Host "Starting native alexg5-live with $python"
+    $ErrLog = Join-Path $LogDir "alexg-live.err.log"
+    Write-Host "Starting native $strategy with $python"
     $proc = Start-Process -FilePath $python `
         -ArgumentList $argList `
         -WorkingDirectory $LiveRoot `
@@ -90,7 +95,7 @@ function Start-NativeService {
         -WindowStyle Hidden
 
     Set-Content -Path $PidFile -Value $proc.Id -Encoding ascii
-    Write-Host "alexg5-live started PID $($proc.Id) — logs: $OutLog / $ErrLog"
+    Write-Host "$strategy started PID $($proc.Id) — logs: $OutLog / $ErrLog"
 }
 
 function Restart-DockerService {

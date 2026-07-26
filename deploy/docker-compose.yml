@@ -1,4 +1,4 @@
-# Deploy host compose for alexg5 live.
+# Deploy host compose for alexg live (default alexg7).
 # Default image tag comes from Drone (ci-cd). Override with:
 #   $env:BOREX_DOCKER_REPO="your/repo"; $env:BOREX_DOCKER_TAG="ci-cd"
 #
@@ -7,9 +7,9 @@
 # dry-run / dashboard packaging; live MT5 needs Windows Python + terminal.
 
 services:
-  alexg5-live:
-    image: ${BOREX_DOCKER_REPO:-borex/alexg5-live}:${BOREX_DOCKER_TAG:-ci-cd}
-    container_name: alexg5-live
+  alexg-live:
+    image: ${BOREX_DOCKER_REPO:-borex/alexg-live}:${BOREX_DOCKER_TAG:-ci-cd}
+    container_name: alexg-live
     restart: unless-stopped
     env_file:
       - borex_live/.env
@@ -22,11 +22,13 @@ services:
       - mt5service.py
       - --demo
       - --strategy
-      - alexg5
+      - alexg7
       - --leverage
       - "5000"
       - --rr-factor
       - "2.5"
+      - --min-rr
+      - "3.0"
       - --host
       - "0.0.0.0"
       - --port

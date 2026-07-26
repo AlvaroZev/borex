@@ -29,10 +29,14 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Borex live MT5 service")
     p.add_argument("--demo", action="store_true", help="Use MT5 demo account env vars")
     p.add_argument("--live-account", action="store_true", help="Use live MT5 credentials")
-    p.add_argument("--strategy", default="alexg5", help="alexg3|alexg4|alexg5|alexg6")
+    p.add_argument(
+        "--strategy",
+        default="alexg7",
+        help="alexg3|alexg4|alexg5|alexg5revised|alexg6|alexg7|alexg8",
+    )
     p.add_argument("--leverage", "-l", type=float, default=5000.0)
     p.add_argument("--rr-factor", type=float, default=2.5)
-    p.add_argument("--min-rr", type=float, default=2.0)
+    p.add_argument("--min-rr", type=float, default=3.0)
     p.add_argument("--capital", type=float, default=1000.0)
     p.add_argument("--position-size", type=float, default=0.01)
     p.add_argument(
@@ -49,6 +53,17 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated Yahoo symbols; default = all MT5 Forex pairs",
     )
     p.add_argument("--second-signal", choices=["off", "flip", "replace"], default="off")
+    p.add_argument(
+        "--ltf-intervals",
+        default="1m",
+        help="AlexG8: comma-separated lower TFs for SL-fill confirm (default: 1m)",
+    )
+    p.add_argument(
+        "--ltf-confirm-mode",
+        choices=["any", "all"],
+        default="any",
+        help="AlexG8: any=at least one LTF confirms; all=every LTF must",
+    )
     p.add_argument("--default-lot", type=float, default=0.01)
     p.add_argument("--warmup-bars", type=int, default=300)
     p.add_argument("--port", type=int, default=8790)
@@ -68,6 +83,9 @@ def build_config(args: argparse.Namespace) -> LiveServiceConfig:
     symbols = [
         s.strip() for s in (args.symbols or "").split(",") if s.strip()
     ]
+    ltf_intervals = tuple(
+        s.strip() for s in (args.ltf_intervals or "1m").split(",") if s.strip()
+    ) or ("1m",)
     cfg = LiveServiceConfig(
         strategy=args.strategy,
         demo=args.demo and not args.live_account,
@@ -80,6 +98,8 @@ def build_config(args: argparse.Namespace) -> LiveServiceConfig:
         interval=args.interval,
         master_yahoo=args.master,
         second_signal=args.second_signal,
+        ltf_intervals=ltf_intervals,
+        ltf_confirm_mode=args.ltf_confirm_mode,
         default_lot=args.default_lot,
         dry_run=args.dry_run,
         port=args.port,

@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from borex.alexg.strategy4 import _PendingSetup
+from borex.alexg.ghost_entry import PendingSetup
 from borex.models.candle import Signal, SignalAction
 
 from borex_live.entry_mode import EntryMode
@@ -21,7 +21,7 @@ def read_pending_snapshot(strategy: Any) -> dict[str, GhostSnapshot]:
         return {}
     out: dict[str, GhostSnapshot] = {}
     for symbol, p in pending.items():
-        if not isinstance(p, _PendingSetup):
+        if not isinstance(p, PendingSetup):
             continue
         out[symbol] = GhostSnapshot(
             symbol=symbol,
@@ -42,7 +42,7 @@ def restore_pending_to_strategy(strategy: Any, ghosts: list[GhostSnapshot]) -> N
         return
     for g in ghosts:
         action = SignalAction.BUY if g.action in ("buy", "BUY") else SignalAction.SELL
-        strategy._pending[g.symbol] = _PendingSetup(
+        strategy._pending[g.symbol] = PendingSetup(
             action=action,
             pattern=g.pattern,
             stop_loss=g.stop_loss,

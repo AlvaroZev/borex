@@ -7,17 +7,22 @@ from pathlib import Path
 
 @dataclass
 class LiveServiceConfig:
-    strategy: str = "alexg5"
+    strategy: str = "alexg7"
     demo: bool = True
     capital: float = 1000.0
     leverage: float = 5000.0
     rr_factor: float = 2.5
-    min_rr: float = 2.0
+    # alexg7/8 backtests use 3.0; alexg5 historically used 2.0 + rr_factor.
+    min_rr: float = 3.0
     position_size_pct: float = 0.01
     max_positions: int = 60
     interval: str = "1h"
     master_yahoo: str = "EURUSD=X"
     second_signal: str = "off"
+    # alexg8: LTF confirm at ghost SL fill (MT5 1m by default).
+    ltf_intervals: tuple[str, ...] = ("1m",)
+    ltf_confirm_mode: str = "any"
+    ltf_warmup_bars: int = 500
     default_lot: float = 0.01
     dry_run: bool = False
     port: int = 8790

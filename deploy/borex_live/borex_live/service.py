@@ -19,8 +19,9 @@ from borex_live.config import LiveServiceConfig
 from borex_live.data.feed import (
     _drop_forming_bar,
     _interval_seconds,
-    bootstrap_candles,
+    load_ltf_universe,
     load_universe,
+    refresh_ltf_bars,
 )
 from borex_live.engine.live_engine import LiveEngine
 from borex_live.entry_mode import EntryMode
@@ -46,10 +47,12 @@ class LiveService:
         )
         self.candles_by_symbol: dict[str, list[Candle]] = {}
         self.live_candles_by_symbol: dict[str, list[Candle]] = {}
+        self.ltf_by_symbol: dict[str, dict[str, list[Candle]]] = {}
         self.master_symbol: str = cfg.master_yahoo
         self._live_started_at: pd.Timestamp | None = None
         self._stop = threading.Event()
         self._runtime: dict[str, Any] = {"status": "init"}
+        self._strategy: Any = None
 
     @property
     def runtime(self) -> dict[str, Any]:
@@ -74,7 +77,11 @@ class LiveService:
             self.cfg.strategy,
             min_rr=self.cfg.min_rr,
             second_signal=self.cfg.second_signal,
+            execution_interval=self.cfg.interval,
+            ltf_intervals=self.cfg.ltf_intervals,
+            ltf_confirm_mode=self.cfg.ltf_confirm_mode,
         )
+        self._strategy = strategy
         if self.cfg.dry_run and not self.mt5.dry_run:
             self.mt5.dry_run = True
 
@@ -90,6 +97,7 @@ class LiveService:
 
         self.candles_by_symbol = load_universe(symbols, self.cfg, self.mt5)
         symbols = list(self.candles_by_symbol.keys())
+        self._attach_ltf(strategy, symbols)
         # Prefer configured master if it has bars; else densest series; else configured master.
         preferred = self.cfg.master_yahoo
         if preferred in self.candles_by_symbol and self.candles_by_symbol[preferred]:
@@ -190,6 +198,50 @@ class LiveService:
         self.mt5.disconnect()
         self._runtime["status"] = "stopped"
 
+    def _attach_ltf(self, strategy: Any, symbols: list[str]) -> None:
+        """Warm up and attach lower-TF series when the strategy supports it (alexg8)."""
+        if not hasattr(strategy, "attach_ltf"):
+            self.ltf_by_symbol = {}
+            return
+        intervals = tuple(
+            getattr(strategy, "ltf_intervals", None) or self.cfg.ltf_intervals or ("1m",)
+        )
+        self.ltf_by_symbol = load_ltf_universe(
+            symbols,
+            intervals,
+            mt5=self.mt5,
+            warmup_bars=self.cfg.ltf_warmup_bars,
+        )
+        strategy.attach_ltf(self.ltf_by_symbol)
+        self._runtime["ltf_intervals"] = list(intervals)
+        self._runtime["ltf_symbols"] = len(self.ltf_by_symbol)
+        logger.info(
+            "Attached LTF for %s: %d symbols (%s)",
+            self.cfg.strategy,
+            len(self.ltf_by_symbol),
+            ",".join(intervals),
+        )
+
+    def _refresh_ltf(self) -> None:
+        strategy = getattr(self, "_strategy", None) or getattr(
+            getattr(self, "engine", None), "strategy", None
+        )
+        if strategy is None or not hasattr(strategy, "attach_ltf"):
+            return
+        intervals = tuple(
+            getattr(strategy, "ltf_intervals", None) or self.cfg.ltf_intervals or ("1m",)
+        )
+        added = refresh_ltf_bars(
+            self.ltf_by_symbol,
+            list(self.candles_by_symbol.keys()),
+            intervals,
+            mt5=self.mt5,
+            keep=self.cfg.ltf_warmup_bars,
+        )
+        if added:
+            strategy.attach_ltf(self.ltf_by_symbol)
+            logger.debug("Refreshed %d LTF bars", added)
+
     def _master_index(self) -> int:
         return len(self.candles_by_symbol[self.master_symbol]) - 1
 
@@ -203,6 +255,8 @@ class LiveService:
         new_live: list[tuple[str, Candle]] = []
         if self.mt5.dry_run:
             return {"skipped": "dry_run_no_live_bars"}
+
+        self._refresh_ltf()
 
         # Always keep ghost SL limits on the broker and book early fills.
         ghost_fills: list[str] = []

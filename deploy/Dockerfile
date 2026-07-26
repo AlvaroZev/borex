@@ -1,4 +1,4 @@
-# AlexG5 live service image.
+# AlexG7 live service image.
 # CI / dry-run: works on Linux (MetaTrader5 not installed).
 # Live trading on the Windows host: prefer BOREX_DEPLOY_MODE=native in
 # restart-live.ps1 (MT5 IPC requires Windows Python + local terminal64.exe).
@@ -37,5 +37,5 @@ WORKDIR /app/deploy/borex_live
 EXPOSE 8790
 
 # Default: dry-run smoke. Override CMD on the deploy host for --demo live.
-CMD ["python", "mt5service.py", "--dry-run", "--strategy", "alexg5", \
-     "--leverage", "5000", "--rr-factor", "2.5", "--no-ui"]
+CMD ["python", "mt5service.py", "--dry-run", "--strategy", "alexg7", \
+     "--leverage", "5000", "--rr-factor", "2.5", "--min-rr", "3.0", "--no-ui"]

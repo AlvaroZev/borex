@@ -83,7 +83,7 @@ def bootstrap_candles(
 ) -> list[Candle]:
     """
     Warmup pull order:
-      1. Dukascopy parquet cache
+      1. Dukascopy parquet cache (skipped for sub-hour — too large for live LTF)
       2. MT5 history
       3. Yahoo Finance (yfinance)
 
@@ -91,11 +91,17 @@ def bootstrap_candles(
     stays in the universe and fills from live MT5 bars.
     """
     need = max(MIN_WARMUP_BARS, int(warmup_bars or MIN_WARMUP_BARS))
-    sources: list[tuple[str, Callable[[], list[Candle]]]] = [
-        ("dukascopy", lambda: _from_dukascopy(yahoo_symbol, interval)),
-        ("mt5", lambda: _from_mt5(yahoo_symbol, interval, mt5, need)),
-        ("yfinance", lambda: _from_yfinance(yahoo_symbol, interval)),
-    ]
+    key = interval.strip().lower()
+    skip_duka = key in {"1s", "1m", "5m", "15m", "30m"}
+    sources: list[tuple[str, Callable[[], list[Candle]]]] = []
+    if not skip_duka:
+        sources.append(("dukascopy", lambda: _from_dukascopy(yahoo_symbol, interval)))
+    sources.extend(
+        [
+            ("mt5", lambda: _from_mt5(yahoo_symbol, interval, mt5, need)),
+            ("yfinance", lambda: _from_yfinance(yahoo_symbol, interval)),
+        ]
+    )
 
     best: list[Candle] = []
     best_source = ""
@@ -227,3 +233,80 @@ def load_universe(
         empty,
     )
     return out
+
+
+def load_ltf_universe(
+    symbols: list[str],
+    intervals: tuple[str, ...] | list[str],
+    *,
+    mt5: Mt5Client,
+    warmup_bars: int = 500,
+) -> dict[str, dict[str, list[Candle]]]:
+    """
+    Lower-TF series for alexg8 ghost-fill confirmation.
+    Shape: symbol -> {interval -> candles}.
+    """
+    out: dict[str, dict[str, list[Candle]]] = {}
+    tfs = [str(i).strip() for i in intervals if str(i).strip()]
+    if not tfs:
+        return out
+    need = max(MIN_WARMUP_BARS, int(warmup_bars or MIN_WARMUP_BARS))
+    loaded = 0
+    for sym in symbols:
+        by_tf: dict[str, list[Candle]] = {}
+        for tf in tfs:
+            try:
+                bars = bootstrap_candles(sym, tf, mt5=mt5, warmup_bars=need)
+            except Exception as exc:
+                logger.warning("LTF warmup miss %s %s: %s", sym, tf, exc)
+                bars = []
+            if bars:
+                by_tf[tf] = bars
+                loaded += 1
+        if by_tf:
+            out[sym] = by_tf
+    logger.info(
+        "LTF universe ready: %d symbols, %d series (%s)",
+        len(out),
+        loaded,
+        ",".join(tfs),
+    )
+    return out
+
+
+def refresh_ltf_bars(
+    store: dict[str, dict[str, list[Candle]]],
+    symbols: list[str],
+    intervals: tuple[str, ...] | list[str],
+    *,
+    mt5: Mt5Client,
+    keep: int = 500,
+) -> int:
+    """Append newest closed LTF bars from MT5 into an existing LTF store."""
+    if mt5.dry_run or not mt5.connected:
+        return 0
+    added = 0
+    tfs = [str(i).strip() for i in intervals if str(i).strip()]
+    for sym in symbols:
+        by_tf = store.setdefault(sym, {})
+        for tf in tfs:
+            try:
+                bars = mt5.fetch_bars(sym, tf, count=5)
+            except Exception as exc:
+                logger.debug("LTF refresh miss %s %s: %s", sym, tf, exc)
+                continue
+            closed = _drop_forming_bar(bars, tf)
+            if not closed:
+                continue
+            series = by_tf.setdefault(tf, [])
+            for bar in closed:
+                if series and series[-1].timestamp > bar.timestamp:
+                    continue
+                if series and series[-1].timestamp == bar.timestamp:
+                    series[-1] = bar
+                    continue
+                series.append(bar)
+                added += 1
+            if keep > 0 and len(series) > keep:
+                by_tf[tf] = series[-keep:]
+    return added

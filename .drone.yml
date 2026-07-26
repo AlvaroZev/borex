@@ -1,7 +1,7 @@
 ---
 kind: pipeline
 type: docker
-name: alexg5-ci-cd
+name: alexg7-ci-cd
 
 trigger:
   branch:
@@ -21,7 +21,7 @@ steps:
       - pip install --no-cache-dir -r requirements.txt -r deploy/requirements-ci.txt
       - export BOREX_MAIN_ROOT=$$PWD
       - cd deploy/borex_live
-      - python mt5service.py --dry-run --strategy alexg5 --leverage 5000 --rr-factor 2.5 --tick-once --no-ui
+      - python mt5service.py --dry-run --strategy alexg7 --leverage 5000 --rr-factor 2.5 --min-rr 3.0 --tick-once --no-ui
 
   - name: build
     image: plugins/docker
