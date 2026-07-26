@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Borex Live Candles</title>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    :root {
+      --bg: #0f1419; --panel: #1a2332; --border: #2d3a4f;
+      --text: #e7ecf3; --muted: #8b9cb3; --accent: #3b82f6; --green: #22c55e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg); color: var(--text);
+      display: flex; flex-direction: column; height: 100vh;
+    }
+    header {
+      padding: 0.85rem 1.25rem; border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem;
+      align-items: center; justify-content: space-between;
+    }
+    header h1 { font-size: 1.05rem; font-weight: 600; }
+    nav a { color: var(--accent); text-decoration: none; font-size: 0.85rem; margin-right: 0.75rem; }
+    nav a:hover { text-decoration: underline; }
+    .meta { font-size: 0.82rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 0.75rem; }
+    .meta strong { color: var(--text); }
+    .controls {
+      display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+    }
+    select, button {
+      background: #0f1419; color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.85rem;
+    }
+    button { cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    main { flex: 1; min-height: 0; display: flex; }
+    #chart { flex: 1; min-width: 0; }
+    .empty {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 0.95rem; pointer-events: none;
+    }
+    .chart-wrap { position: relative; flex: 1; min-height: 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Live candles (MT5 only)</h1>
+      <nav>
+        <a href="/">Dashboard</a>
+        <a href="/candles">Candles</a>
+      </nav>
+    </div>
+    <div class="controls">
+      <label for="symbol">Symbol</label>
+      <select id="symbol"></select>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+    <div class="meta" id="meta">Loading…</div>
+  </header>
+  <main>
+    <div class="chart-wrap">
+      <div id="chart"></div>
+      <div class="empty" id="empty" hidden>No live candles yet — waiting for closed MT5 bars after service start.</div>
+    </div>
+  </main>
+  <script>
+    const chartEl = document.getElementById('chart');
+    const emptyEl = document.getElementById('empty');
+    const symbolSel = document.getElementById('symbol');
+    const metaEl = document.getElementById('meta');
+
+    const chart = LightweightCharts.createChart(chartEl, {
+      layout: { background: { color: '#0f1419' }, textColor: '#8b9cb3' },
+      grid: { vertLines: { color: '#1a2332' }, horzLines: { color: '#1a2332' } },
+      rightPriceScale: { borderColor: '#2d3a4f' },
+      timeScale: { borderColor: '#2d3a4f', timeVisible: true, secondsVisible: false },
+    });
+    const series = chart.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444',
+      borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+    });
+
+    function resize() {
+      chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight || window.innerHeight - 80 });
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    async function loadIndex() {
+      const r = await fetch('/api/live-candles');
+      const d = await r.json();
+      const status = await fetch('/api/status').then(x => x.json()).catch(() => ({}));
+      const symbols = (d.symbols || []).map(s => s.symbol);
+      const universe = status.symbols || symbols;
+      const all = [...new Set([...universe, ...symbols])].sort();
+      const prev = symbolSel.value;
+      symbolSel.innerHTML = all.map(s => {
+        const row = (d.symbols || []).find(x => x.symbol === s);
+        const n = row ? row.count : 0;
+        return `<option value="${s}">${s} (${n})</option>`;
+      }).join('');
+      if (prev && all.includes(prev)) symbolSel.value = prev;
+      else if (status.master && all.includes(status.master)) symbolSel.value = status.master;
+      else if (all.length) symbolSel.value = all[0];
+      metaEl.innerHTML = `
+        <span>Interval: <strong>${d.interval || '-'}</strong></span>
+        <span>Live bars total: <strong>${d.total ?? 0}</strong></span>
+        <span>Strategy: <strong>${status.strategy || '-'}</strong></span>
+        <span>Status: <strong>${status.status || '-'}</strong></span>`;
+    }
+
+    async function loadSymbol() {
+      const sym = symbolSel.value;
+      if (!sym) return;
+      const r = await fetch('/api/live-candles/' + encodeURIComponent(sym));
+      const d = await r.json();
+      const candles = (d.candles || []).map(c => ({
+        time: c.time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }));
+      series.setData(candles);
+      emptyEl.hidden = candles.length > 0;
+      if (candles.length) chart.timeScale().fitContent();
+      metaEl.innerHTML = `
+        <span>Symbol: <strong>${sym}</strong></span>
+        <span>Live bars: <strong>${d.count}</strong></span>
+        <span>Interval: <strong>${d.interval}</strong></span>
+        <span>Source: <strong>MT5 live only</strong></span>`;
+    }
+
+    symbolSel.addEventListener('change', loadSymbol);
+    document.getElementById('refresh').addEventListener('click', async () => {
+      await loadIndex();
+      await loadSymbol();
+    });
+
+    (async () => {
+      await loadIndex();
+      await loadSymbol();
+      setInterval(async () => { await loadIndex(); await loadSymbol(); }, 15000);
+    })();
+  </script>
+</body>
+</html>

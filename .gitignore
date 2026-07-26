@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 .env
 .venv/
+.venv311/
+.venv-ci/
 venv/
 *.egg-info/
 dist/
@@ -12,3 +14,6 @@ data/*.csv
 data/*.db
 data/*.log
 download/
+deploy/borex_live/logs/
+deploy/borex_live/.venv*/
+*.pid

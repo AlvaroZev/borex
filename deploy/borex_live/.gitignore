@@ -1,0 +1,7 @@
+.env
+.venv/
+.venv311/
+__pycache__/
+*.pyc
+scripts/test_mt5_connect.out.txt
+scripts/test_mt5_connect.err.txt

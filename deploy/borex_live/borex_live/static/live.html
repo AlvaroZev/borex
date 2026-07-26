@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Borex Live</title>
+  <style>
+    :root {
+      --bg: #0f1419; --panel: #1a2332; --border: #2d3a4f;
+      --text: #e7ecf3; --muted: #8b9cb3; --green: #22c55e; --red: #ef4444; --accent: #3b82f6;
+      --yellow: #fbbf24;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); background: var(--panel); }
+    header h1 { font-size: 1.1rem; }
+    .meta { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.5rem; font-size: 0.85rem; color: var(--muted); }
+    main { display: grid; grid-template-columns: 1fr; gap: 1rem; padding: 1rem; }
+    @media (min-width: 1100px) { main { grid-template-columns: 1fr 1fr; } }
+    section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; }
+    h2 { font-size: 0.9rem; margin-bottom: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    th, td { text-align: left; padding: 0.4rem 0.3rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    .ghost { color: var(--yellow); }
+    .open { color: var(--accent); }
+    .win { color: var(--green); }
+    .loss { color: var(--red); }
+    .muted { color: var(--muted); }
+    .badge { font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 4px; background: #243044; color: var(--muted); }
+    .badge.ok { color: var(--green); }
+    .badge.bad { color: var(--red); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Borex Live Dashboard</h1>
+    <nav style="margin-top:0.4rem">
+      <a href="/" style="color:#3b82f6;margin-right:0.75rem;text-decoration:none">Dashboard</a>
+      <a href="/candles" style="color:#3b82f6;text-decoration:none">Live candles</a>
+    </nav>
+    <div class="meta" id="meta">Loading…</div>
+  </header>
+  <main>
+    <section>
+      <h2>Pending limits (waiting for SL hit)</h2>
+      <table id="ghosts">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Side</th><th>Trigger</th><th>SL</th><th>TP</th><th>Ticket</th><th>MT5</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Open positions (filled on MT5)</h2>
+      <table id="open">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP</th>
+            <th>Float PnL</th><th>Ticket</th><th>Exp W/L</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section style="grid-column: 1 / -1;">
+      <h2>Recent closed</h2>
+      <table id="closed"><thead><tr><th>Symbol</th><th>PnL</th><th>Reason</th></tr></thead><tbody></tbody></table>
+    </section>
+  </main>
+  <script>
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+    const n = (v, d=5) => (v == null || Number.isNaN(+v)) ? '-' : (+v).toFixed(d);
+    const usd = (v) => (v == null || Number.isNaN(+v)) ? '-' : ((+v >= 0 ? '+' : '') + '$' + (+v).toFixed(2));
+
+    async function refresh() {
+      const r = await fetch('/api/dashboard');
+      const d = await r.json();
+      const wr = d.win_rate != null ? (d.win_rate * 100).toFixed(1) + '%' : 'n/a';
+      document.getElementById('meta').innerHTML = `
+        <span>Strategy: <strong>${esc(d.runtime?.strategy)}</strong></span>
+        <span>Entry: <strong>${esc(d.entry_mode)}</strong></span>
+        <span>Cash: <strong>$${(d.cash ?? 0).toFixed(2)}</strong></span>
+        <span>WR: <strong>${wr}</strong></span>
+        <span>Open: <strong>${(d.open_trades || []).length}</strong></span>
+        <span>Pending: <strong>${(d.pending_ghosts || []).length}</strong></span>
+        <span>Live bars: <strong>${d.live_candle_count ?? 0}</strong></span>
+        <span>MT5: <strong>${d.runtime?.mt5_connected ? 'ok' : 'off'}</strong></span>`;
+
+      const gt = document.querySelector('#ghosts tbody');
+      const ghosts = d.pending_ghosts || [];
+      gt.innerHTML = ghosts.map(g => `<tr class="ghost">
+        <td>${esc(g.symbol)}</td>
+        <td>${esc(g.action)}</td>
+        <td>${n(g.trigger_price ?? g.stop_loss)}</td>
+        <td>${n(g.protect_sl)}</td>
+        <td>${n(g.protect_tp)}</td>
+        <td>${esc(g.mt5_ticket ?? '-')}</td>
+        <td><span class="badge ${g.mt5_live ? 'ok' : 'bad'}">${g.mt5_live ? 'live' : 'missing'}</span></td>
+      </tr>`).join('') || '<tr><td colspan="7" class="muted">None</td></tr>';
+
+      const ot = document.querySelector('#open tbody');
+      const opens = d.open_trades || [];
+      ot.innerHTML = opens.map(t => {
+        const pnl = t.floating_pnl;
+        const pnlCls = pnl == null ? '' : (pnl >= 0 ? 'win' : 'loss');
+        const stale = t.stale ? ' <span class="badge bad">stale</span>' : '';
+        return `<tr class="open">
+          <td>${esc(t.symbol)}${stale}</td>
+          <td>${esc(t.side)}</td>
+          <td>${n(t.entry_price)}</td>
+          <td>${n(t.stop_loss)}</td>
+          <td>${n(t.take_profit)}</td>
+          <td class="${pnlCls}">${usd(pnl)}</td>
+          <td>${esc(t.mt5_ticket ?? '-')}</td>
+          <td><span class="win">${usd(t.expected_win_usd)}</span> / <span class="loss">${usd(t.expected_loss_usd && -Math.abs(t.expected_loss_usd))}</span></td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="8" class="muted">None — only filled trades appear here (pending limits are above)</td></tr>';
+
+      const ct = document.querySelector('#closed tbody');
+      ct.innerHTML = (d.closed_trades || []).map(t => `<tr class="${t.pnl >= 0 ? 'win' : 'loss'}">
+        <td>${esc(t.symbol)}</td>
+        <td>${t.pnl >= 0 ? '+' : ''}$${(+t.pnl).toFixed(2)}</td>
+        <td>${esc(t.exit_reason)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">None</td></tr>';
+    }
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
