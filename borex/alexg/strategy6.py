@@ -52,7 +52,7 @@ class AlexG6Strategy(AlexG5Strategy):
         return _PendingSetup(
             action=setup.action,
             pattern=setup.pattern,
-            stop_loss=setup.stop_loss,
+            stop_loss=self._scaled_ghost_sl(setup.price, setup.stop_loss, setup.action),
             take_profit=setup.take_profit,
             planned_entry=setup.price,
             created_index=index,

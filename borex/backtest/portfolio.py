@@ -32,10 +32,17 @@ class Trade:
     pnl_pct: float = 0.0
     commission: float = 0.0
     exit_reason: str = ""
+    # If set, ignore SL / margin-stop until bar index >= this value (TP still active).
+    sl_armed_from_index: int | None = None
 
     @property
     def is_open(self) -> bool:
         return self.exit_index is None
+
+    def sl_is_armed(self, index: int) -> bool:
+        if self.sl_armed_from_index is None:
+            return True
+        return index >= self.sl_armed_from_index
 
 
 @dataclass
@@ -79,7 +86,8 @@ class Portfolio:
     def _unrealized_pnl(self, trade: Trade, price: float) -> float:
         move = self._pnl_pct(trade, price)
         if self.size_mode == "margin":
-            return trade.margin * move * self.leverage
+            # Cap at -margin: stop-out loses the posted margin, not the whole account.
+            return max(-trade.margin, trade.margin * move * self.leverage)
         return trade.margin * move
 
     def notional(self, trade: Trade) -> float:
@@ -193,6 +201,7 @@ class Portfolio:
         score: float = 0.0,
         risk_per_trade_pct: float | None = None,
         size_mode: str | None = None,
+        sl_armed_from_index: int | None = None,
     ) -> bool:
         if not self.can_open():
             return False
@@ -220,6 +229,7 @@ class Portfolio:
             margin=margin,
             entry_cash=entry_cash,
             entry_equity=entry_equity,
+            sl_armed_from_index=sl_armed_from_index,
         )
         return True
 

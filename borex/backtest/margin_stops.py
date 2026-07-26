@@ -28,6 +28,31 @@ def rr_from_winrate(winrate: float | None, default_rr: float = 2.0) -> float:
     return 1.0 / winrate
 
 
+def resolve_rr(
+    *,
+    rr_mode: str = "fixed",
+    fixed_rr: float = 3.0,
+    winrate: float | None = None,
+    rr_factor: float = 1.0,
+) -> float:
+    """
+    Resolve take-profit RR for margin / true-SL exits.
+
+    - fixed: use ``fixed_rr`` (default 3)
+    - dynamic: ``1 / winrate`` (falls back to ``fixed_rr`` before history)
+    Both modes are multiplied by ``rr_factor`` (TP multiplier).
+    """
+    mode = (rr_mode or "fixed").strip().lower()
+    if mode == "dynamic":
+        base = rr_from_winrate(winrate, fixed_rr)
+    elif mode == "fixed":
+        base = fixed_rr if fixed_rr > 0 else 3.0
+    else:
+        raise ValueError(f"Unknown rr_mode: {rr_mode!r}. Use 'fixed' or 'dynamic'.")
+    factor = rr_factor if rr_factor > 0 else 1.0
+    return base * factor
+
+
 def tighten_sl_to_margin_stop(
     entry: float,
     stop_loss: float | None,

@@ -1,0 +1,18 @@
+{
+  "target_years": 3,
+  "timeframe": "1m",
+  "ok": 10,
+  "still_needed": 0,
+  "pairs": [
+    "EURUSD=X",
+    "GBPUSD=X",
+    "USDJPY=X",
+    "AUDUSD=X",
+    "USDCAD=X",
+    "USDCHF=X",
+    "NZDUSD=X",
+    "EURGBP=X",
+    "EURJPY=X",
+    "GBPJPY=X"
+  ]
+}

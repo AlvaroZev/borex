@@ -1,0 +1,81 @@
+{
+  "params": {
+    "strategy": "alexg5",
+    "period": "max",
+    "interval": "1h",
+    "rr_mode": "fixed",
+    "min_rr": 3.0,
+    "capital": 1000.0,
+    "leverage": 5000.0,
+    "position_size_pct": 0.01,
+    "max_positions": 9999
+  },
+  "runs": [
+    {
+      "label": "pairs10",
+      "n_pairs": 10,
+      "pairs": [
+        "EURUSD=X",
+        "GBPUSD=X",
+        "USDJPY=X",
+        "AUDUSD=X",
+        "USDCAD=X",
+        "USDCHF=X",
+        "NZDUSD=X",
+        "EURGBP=X",
+        "EURJPY=X",
+        "GBPJPY=X"
+      ],
+      "master": "EURUSD=X",
+      "master_bars": 17215,
+      "trades": 595,
+      "wins": 181,
+      "losses": 414,
+      "win_rate": 0.304202,
+      "return_pct": 2.270105,
+      "max_dd_pct": 0.475563,
+      "profit_factor": 1.305654,
+      "final_equity": 3270.1,
+      "initial_capital": 1000.0,
+      "elapsed_sec": 2598.3
+    },
+    {
+      "label": "pairs20",
+      "n_pairs": 20,
+      "pairs": [
+        "EURUSD=X",
+        "GBPUSD=X",
+        "USDJPY=X",
+        "AUDUSD=X",
+        "USDCAD=X",
+        "USDCHF=X",
+        "NZDUSD=X",
+        "EURGBP=X",
+        "EURJPY=X",
+        "GBPJPY=X",
+        "EURCHF=X",
+        "EURCAD=X",
+        "EURAUD=X",
+        "EURNZD=X",
+        "GBPCAD=X",
+        "AUDJPY=X",
+        "NZDJPY=X",
+        "CADJPY=X",
+        "CHFJPY=X",
+        "AUDCAD=X"
+      ],
+      "master": "EURUSD=X",
+      "master_bars": 17215,
+      "trades": 1003,
+      "wins": 278,
+      "losses": 725,
+      "win_rate": 0.277168,
+      "return_pct": 1.522178,
+      "max_dd_pct": 0.656151,
+      "profit_factor": 1.111753,
+      "final_equity": 2522.18,
+      "initial_capital": 1000.0,
+      "elapsed_sec": 7215.8
+    }
+  ]
+}

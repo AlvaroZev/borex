@@ -11,9 +11,18 @@ from borex.alexg import (
     AlexG3Strategy,
     AlexG4Strategy,
     AlexG5Strategy,
+    AlexG5RevisedStrategy,
     AlexG6Strategy,
+    AlexG6_1mStrategy,
+    AlexG6aStrategy,
+    AlexG6bStrategy,
+    AlexG7Strategy,
+    AlexG8OptimizedStrategy,
+    AlexG8Strategy,
+    AlexGMarketStrategy,
     AlexGMethodStrategy,
 )
+from borex.alexg.ablation import AblationConfig, video1_default, video2_winner
 from borex.alexg.multi_market import default_forex_universe, pick_master_symbol
 from borex.backtest import BacktestConfig, BacktestEngine, MultiMarketEngine
 from borex.institutional import InstitutionalFlowStrategy
@@ -49,9 +58,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "institutional"],
+        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg5revised", "alexg6", "alexg6a", "alexg6b", "alexg6-1m", "alexg7", "alexg8", "alexg8optimized", "alexg-market", "institutional"],
         default="candles",
-        help="Estrategia: candles, alexg, alexg2, alexg3, alexg4, alexg5, alexg6 o institutional",
+        help="Estrategia: candles, alexg..alexg8optimized, alexg5revised, alexg6-1m, alexg-market o institutional",
     )
     parser.add_argument(
         "--symbol", "-s", default="EURUSD=X", help="Símbolo principal (yfinance)"
@@ -144,13 +153,85 @@ def parse_args() -> argparse.Namespace:
         "--min-rr",
         type=float,
         default=3.0,
-        help="AlexG: risk/reward mínimo (ej. 3 = TP/SL 3:1)",
+        help="AlexG: risk/reward mínimo / RR fijo (ej. 3 = TP/SL 3:1)",
+    )
+    parser.add_argument(
+        "--rr-mode",
+        choices=["fixed", "dynamic"],
+        default="fixed",
+        help=(
+            "AlexG5+: fixed = usar --min-rr como RR; "
+            "dynamic = RR = 1/winrate (fallback --min-rr). "
+            "Ambos se multiplican por --rr-factor."
+        ),
     )
     parser.add_argument(
         "--rr-factor",
         type=float,
         default=1.0,
-        help="AlexG5/6: multiplica el RR dinámico (1/winrate). Ej. 1.1 = TP 10%% más lejos",
+        help="AlexG5+: multiplicador de TP sobre el RR resuelto. Ej. 1.1 = TP 10%% más lejos",
+    )
+    parser.add_argument(
+        "--ltf-intervals",
+        nargs="+",
+        default=["1m"],
+        help="AlexG8/alexg8optimized: lower TFs for TP-direction confirm at ghost SL (default: 1m; add 1s if cached)",
+    )
+    parser.add_argument(
+        "--ltf-confirm-mode",
+        choices=["any", "all"],
+        default="any",
+        help="AlexG8/alexg8optimized: any=at least one LTF confirms; all=every available LTF must confirm",
+    )
+    parser.add_argument(
+        "--ghost-sl-mult",
+        type=float,
+        default=1.0,
+        help=(
+            "AlexG4+/7/8: scale |ghost_entry − ghost_SL|. "
+            "1=structural SL; <1 tighter (closer fill); >1 wider"
+        ),
+    )
+    parser.add_argument(
+        "--ablation-preset",
+        choices=["video1", "video2", "custom"],
+        default="video1",
+        help="AlexG5revised: preset de reglas (video1 original / video2 winner / custom flags)",
+    )
+    parser.add_argument(
+        "--htf-bias",
+        choices=["off", "pair", "weekly", "daily", "4h"],
+        default=None,
+        help="AlexG5revised ablation: higher-TF bias mode",
+    )
+    parser.add_argument(
+        "--no-chart-trend",
+        action="store_true",
+        help="AlexG5revised ablation: disable trade-TF trend filter",
+    )
+    parser.add_argument(
+        "--no-pattern",
+        action="store_true",
+        help="AlexG5revised ablation: enter on close-in-AOI without candle pattern",
+    )
+    parser.add_argument(
+        "--require-retest",
+        action="store_true",
+        help="AlexG5revised ablation: require leave+return retest of AOI",
+    )
+    parser.add_argument(
+        "--no-ghost-sl-entry",
+        action="store_true",
+        help=(
+            "AlexG5revised ablation: enter immediately at the AOI close "
+            "instead of queueing a ghost trade and filling at its SL"
+        ),
+    )
+    parser.add_argument(
+        "--session",
+        choices=["asia", "london", "newyork", "overlap", "all"],
+        default=None,
+        help="AlexG5revised ablation: session filter",
     )
     parser.add_argument(
         "--second-signal",
@@ -279,6 +360,25 @@ def _cache_mode(args: argparse.Namespace) -> str:
     return "auto"
 
 
+def _ablation_from_args(args: argparse.Namespace) -> AblationConfig:
+    if args.ablation_preset == "video2":
+        base = video2_winner()
+    else:
+        base = video1_default()
+    return AblationConfig(
+        htf_bias=args.htf_bias if args.htf_bias is not None else base.htf_bias,
+        require_chart_trend=(
+            False if args.no_chart_trend else base.require_chart_trend
+        ),
+        require_pattern=False if args.no_pattern else base.require_pattern,
+        require_retest=True if args.require_retest else base.require_retest,
+        require_ghost_sl_entry=(
+            False if args.no_ghost_sl_entry else base.require_ghost_sl_entry
+        ),
+        session=args.session if args.session is not None else base.session,
+    )
+
+
 def _build_strategy(args: argparse.Namespace) -> Strategy:
     if args.strategy == "alexg":
         return AlexGMethodStrategy(
@@ -314,6 +414,7 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             min_confirming_pairs=args.min_confirming_pairs,
             filter_false_positives=not args.allow_false_positives,
             disabled_signals=disabled,
+            ghost_sl_mult=args.ghost_sl_mult,
         )
     if args.strategy == "alexg5":
         return AlexG5Strategy(
@@ -324,6 +425,36 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             min_confirming_pairs=args.min_confirming_pairs,
             filter_false_positives=not args.allow_false_positives,
             disabled_signals=disabled,
+            ghost_sl_mult=args.ghost_sl_mult,
+        )
+    if args.strategy == "alexg5revised":
+        return AlexG5RevisedStrategy(
+            min_rr=args.min_rr,
+            ablation=_ablation_from_args(args),
+            execution_interval=args.interval,
+            ghost_sl_mult=args.ghost_sl_mult,
+        )
+    if args.strategy == "alexg7":
+        return AlexG7Strategy(
+            min_rr=args.min_rr,
+            execution_interval=args.interval,
+            ghost_sl_mult=args.ghost_sl_mult,
+        )
+    if args.strategy == "alexg8":
+        return AlexG8Strategy(
+            min_rr=args.min_rr,
+            execution_interval=args.interval,
+            ltf_intervals=tuple(args.ltf_intervals),
+            ltf_confirm_mode=args.ltf_confirm_mode,
+            ghost_sl_mult=args.ghost_sl_mult,
+        )
+    if args.strategy == "alexg8optimized":
+        return AlexG8OptimizedStrategy(
+            min_rr=args.min_rr,
+            execution_interval=args.interval,
+            ltf_intervals=tuple(args.ltf_intervals),
+            ltf_confirm_mode=args.ltf_confirm_mode,
+            ghost_sl_mult=args.ghost_sl_mult,
         )
     if args.strategy == "alexg6":
         return AlexG6Strategy(
@@ -335,6 +466,54 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             filter_false_positives=not args.allow_false_positives,
             disabled_signals=disabled,
             second_signal=args.second_signal,
+            ghost_sl_mult=args.ghost_sl_mult,
+        )
+    if args.strategy == "alexg6a":
+        return AlexG6aStrategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+            second_signal=args.second_signal,
+            ghost_sl_mult=args.ghost_sl_mult,
+        )
+    if args.strategy == "alexg6b":
+        return AlexG6bStrategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+            second_signal=args.second_signal,
+            ghost_sl_mult=args.ghost_sl_mult,
+        )
+    if args.strategy == "alexg6-1m":
+        return AlexG6_1mStrategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            # Keep 1m-scaled strength_lookback (1440); CLI default 24 is for 1h.
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+            second_signal=args.second_signal,
+            ghost_sl_mult=args.ghost_sl_mult,
+        )
+    if args.strategy == "alexg-market":
+        return AlexGMarketStrategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+            second_signal="off",
         )
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
@@ -363,13 +542,34 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         position_size_pct=args.position_size,
         true_sl=args.true_sl,
         true_sl_rr=args.min_rr,
+        rr_mode=args.rr_mode,
         rr_factor=args.rr_factor,
     )
-    if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "institutional"):
-        if args.strategy in ("alexg5", "alexg6"):
-            # AlexG5/6 always use margin stop as SL and winrate-derived RR for TP.
+    margin_family = (
+        "alexg5",
+        "alexg5revised",
+        "alexg6",
+        "alexg6a",
+        "alexg6b",
+        "alexg6-1m",
+        "alexg7",
+        "alexg8",
+        "alexg8optimized",
+        "alexg-market",
+    )
+    if args.strategy in (
+        "alexg",
+        "alexg2",
+        "alexg3",
+        "alexg4",
+        *margin_family,
+        "institutional",
+    ):
+        if args.strategy in margin_family:
+            # AlexG5+ margin family: wipe SL + resolved RR (fixed default / dynamic).
             base["size_mode"] = "margin"
             base["true_sl"] = True
+            base["rr_mode"] = args.rr_mode
             base["rr_factor"] = args.rr_factor
         return BacktestConfig(
             **base,
@@ -380,6 +580,39 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         **base,
         stop_loss_pct=args.stop_loss,
         take_profit_pct=args.take_profit,
+    )
+
+
+def _attach_ltf_for_alexg8(
+    strategy: AlexG8Strategy,
+    symbols: list[str],
+    period: str,
+    cache_mode: str,
+) -> None:
+    """Preload 1m/1s series used to confirm ghost fills move toward TP."""
+    ltf_by_symbol: dict[str, dict] = {}
+    n = len(symbols)
+    for i, sym in enumerate(symbols, 1):
+        by_tf: dict = {}
+        for tf in strategy.ltf_intervals:
+            try:
+                series = load_market_data(sym, period, tf, cache_mode=cache_mode)
+                by_tf[tf] = series
+                print(
+                    f"  LTF [{i}/{n}] {sym} {tf}: {len(series)} bars",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(f"  LTF omitido {sym} {tf}: {exc}", file=sys.stderr)
+        if by_tf:
+            ltf_by_symbol[sym] = by_tf
+    print("  Indexing LTF series…", flush=True)
+    strategy.attach_ltf(ltf_by_symbol)
+    loaded = sum(len(v) for v in ltf_by_symbol.values())
+    print(
+        f"AlexG8 LTF: {len(ltf_by_symbol)} pairs, {loaded} series "
+        f"({', '.join(strategy.ltf_intervals)}; mode={strategy.ltf_confirm_mode})",
+        flush=True,
     )
 
 
@@ -407,6 +640,17 @@ def _run_alexg3(args: argparse.Namespace) -> int:
 
     master = pick_master_symbol(candles_by_symbol, args.symbol)
     strategy = _build_strategy(args)
+    if isinstance(strategy, AlexG8OptimizedStrategy):
+        strategy.configure_lazy_ltf(args.period, cache_mode)
+        print(
+            f"AlexG8Optimized: lazy LTF ({', '.join(strategy.ltf_intervals)}; "
+            f"mode={strategy.ltf_confirm_mode}) — load only near SL fills",
+            flush=True,
+        )
+    elif isinstance(strategy, AlexG8Strategy):
+        _attach_ltf_for_alexg8(
+            strategy, list(candles_by_symbol.keys()), args.period, cache_mode
+        )
     config = _build_config(args)
     engine = MultiMarketEngine(
         strategy, config, max_positions=args.max_positions
@@ -418,6 +662,8 @@ def _run_alexg3(args: argparse.Namespace) -> int:
     )
 
     print(result.summary())
+    if isinstance(strategy, AlexG8OptimizedStrategy):
+        print(strategy.ltf_stats_summary())
     print(f"Pares cargados: {len(result.symbols)} (master: {result.master_symbol})")
     print(f"Velas master: {len(candles_by_symbol[master])}")
     print()
@@ -440,7 +686,7 @@ def main() -> int:
     args = parse_args()
     use_mtf = args.mtf or args.strategy in ("alexg", "alexg2", "institutional")
 
-    if args.strategy in ("alexg3", "alexg4", "alexg5", "alexg6"):
+    if args.strategy in ("alexg3", "alexg4", "alexg5", "alexg5revised", "alexg6", "alexg6a", "alexg6b", "alexg6-1m", "alexg7", "alexg8", "alexg8optimized", "alexg-market"):
         return _run_alexg3(args)
 
     mtf = None
@@ -477,7 +723,23 @@ def main() -> int:
 
     min_bars = (
         80
-        if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6")
+        if args.strategy
+        in (
+            "alexg",
+            "alexg2",
+            "alexg3",
+            "alexg4",
+            "alexg5",
+            "alexg5revised",
+            "alexg6",
+            "alexg6a",
+            "alexg6b",
+            "alexg6-1m",
+            "alexg7",
+            "alexg8",
+            "alexg8optimized",
+            "alexg-market",
+        )
         else 60
         if args.strategy == "institutional"
         else 20

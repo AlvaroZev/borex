@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
 from borex.alexg.aoi2 import build_bidirectional_aoi
 from borex.alexg.multi_market import (
@@ -13,6 +13,15 @@ from borex.alexg.strategy3 import AlexG3Strategy
 from borex.alexg.swings import detect_swings
 from borex.models.candle import Candle
 from borex.viewer.context import _parse_alexg2_pattern, _price_precision, _signal_label
+
+
+def _clone_strategy(strategy: Any) -> Any:
+    """Rebuild a strategy instance with only kwargs it accepts."""
+    params = strategy_params(strategy)
+    if is_dataclass(strategy):
+        allowed = {f.name for f in fields(strategy) if f.init}
+        params = {k: v for k, v in params.items() if k in allowed}
+    return type(strategy)(**params)
 
 
 def _ts_iso(ts: object) -> str:
@@ -35,24 +44,27 @@ def _fmt_price(value: float, precision: int) -> str:
 
 def strategy_params(strategy: AlexG3Strategy) -> dict[str, Any]:
     params = {
-        "min_rr": strategy.min_rr,
-        "tp_fraction": strategy.tp_fraction,
-        "swing_lookback": strategy.swing_lookback,
-        "aoi_tolerance_pct": strategy.aoi_tolerance_pct,
-        "min_aoi_touches": strategy.min_aoi_touches,
-        "min_bars": strategy.min_bars,
-        "signal_cooldown": strategy.signal_cooldown,
-        "strength_lookback": strategy.strength_lookback,
-        "min_currency_edge": strategy.min_currency_edge,
-        "min_confirming_pairs": strategy.min_confirming_pairs,
-        "require_currency_filter": strategy.require_currency_filter,
-        "filter_false_positives": strategy.filter_false_positives,
-        "disabled_signals": strategy.disabled_signals,
-        "name": strategy.name,
+        "min_rr": getattr(strategy, "min_rr", 2.0),
+        "tp_fraction": getattr(strategy, "tp_fraction", 1.0),
+        "swing_lookback": getattr(strategy, "swing_lookback", 5),
+        "aoi_tolerance_pct": getattr(strategy, "aoi_tolerance_pct", 0.002),
+        "min_aoi_touches": getattr(strategy, "min_aoi_touches", 2),
+        "min_bars": getattr(strategy, "min_bars", 120),
+        "signal_cooldown": getattr(strategy, "signal_cooldown", 8),
+        "strength_lookback": getattr(strategy, "strength_lookback", 24),
+        "min_currency_edge": getattr(strategy, "min_currency_edge", 0.0),
+        "min_confirming_pairs": getattr(strategy, "min_confirming_pairs", 0),
+        "require_currency_filter": getattr(strategy, "require_currency_filter", False),
+        "filter_false_positives": getattr(strategy, "filter_false_positives", True),
+        "disabled_signals": getattr(strategy, "disabled_signals", ()),
+        "name": getattr(strategy, "name", "unknown"),
     }
     sl_wait = getattr(strategy, "sl_wait_max_bars", None)
     if sl_wait is not None:
         params["sl_wait_max_bars"] = sl_wait
+    second_signal = getattr(strategy, "second_signal", None)
+    if second_signal is not None:
+        params["second_signal"] = second_signal
     return params
 
 
@@ -261,7 +273,7 @@ def scan_alexg3_decisions(
         for sym, ts_map in ts_maps.items()
     }
 
-    scanner = type(strategy)(**strategy_params(strategy))
+    scanner = _clone_strategy(strategy)
     min_bars = scanner.min_bars
 
     decisions_by_symbol: dict[str, list[dict[str, Any]]] = {s: [] for s in symbols}
@@ -328,9 +340,9 @@ def scan_alexg3_decisions(
             }
         aoi_by_symbol[sym] = latest_aoi_levels(
             candles,
-            swing_lookback=scanner.swing_lookback,
-            tolerance_pct=scanner.aoi_tolerance_pct,
-            min_touches=scanner.min_aoi_touches,
+            swing_lookback=getattr(scanner, "swing_lookback", 5),
+            tolerance_pct=getattr(scanner, "aoi_tolerance_pct", 0.002),
+            min_touches=getattr(scanner, "min_aoi_touches", 2),
         )
 
     analysis = MarketAnalysis(

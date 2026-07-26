@@ -12,10 +12,10 @@ from borex.alexg.multi_market import (
 )
 from borex.backtest.costs import infer_pip_size, TradeCosts, apply_entry_fill, apply_exit_fill
 from borex.backtest.engine import BacktestConfig, BacktestResult, mirror_sl_tp_for_inverse
-from borex.backtest.engine import _build_confirmation_stats, _signal_entry
+from borex.backtest.engine import _build_confirmation_stats, _msl_delay_bars, _signal_entry
 from borex.backtest.margin_stops import (
     margin_stop_out_prices,
-    rr_from_winrate,
+    resolve_rr,
     tighten_sl_to_margin_stop,
     tp_from_sl_rr,
 )
@@ -134,11 +134,25 @@ class MultiMarketEngine:
                     candidates.append((sym, signal, idx))
 
             candidates.sort(key=lambda x: x[1].score, reverse=True)
+            opened: list[str] = []
             for sym, signal, idx in candidates:
                 if not portfolio.can_open(sym):
                     break
                 self._open_signal(portfolio, sym, signal, idx, candles_by_symbol[sym])
+                if sym in portfolio.open_trades:
+                    opened.append(sym)
 
+            # Same-bar protective exits for fills opened this bar (esp. ghost SL).
+            for sym in opened:
+                idx = ctx.indices.get(sym)
+                if idx is None:
+                    continue
+                self._check_exit(portfolio, sym, idx, candles_by_symbol[sym][idx])
+
+            prices = {
+                sym: candles_by_symbol[sym][idx].close
+                for sym, idx in ctx.indices.items()
+            }
             eq = portfolio.equity_at_prices(prices)
             equity_curve.append(eq)
             peak = max(peak, eq)
@@ -174,9 +188,11 @@ class MultiMarketEngine:
 
         stop_loss = signal.stop_loss
         take_profit = signal.take_profit
-        rr = (
-            rr_from_winrate(portfolio.win_rate, self.config.true_sl_rr)
-            * self.config.rr_factor
+        rr = resolve_rr(
+            rr_mode=self.config.rr_mode,
+            fixed_rr=self.config.true_sl_rr,
+            winrate=portfolio.win_rate,
+            rr_factor=self.config.rr_factor,
         )
 
         # Inverse flips the fill side first. Mirror analysis SL/TP onto that
@@ -204,6 +220,8 @@ class MultiMarketEngine:
         elif stop_loss is not None:
             take_profit = tp_from_sl_rr(exec_price, stop_loss, side, rr)
 
+        delay = _msl_delay_bars(signal.pattern)
+        sl_armed = (exec_index + delay) if delay > 0 else None
         portfolio.open_position(
             symbol,
             action,
@@ -216,6 +234,7 @@ class MultiMarketEngine:
             score=rr,
             risk_per_trade_pct=self.config.risk_per_trade_pct,
             size_mode=self.config.size_mode,
+            sl_armed_from_index=sl_armed,
         )
 
     def _close(
@@ -260,7 +279,9 @@ class MultiMarketEngine:
         if trade is None:
             return False
 
-        if self.config.size_mode == "margin":
+        sl_armed = trade.sl_is_armed(index)
+
+        if sl_armed and self.config.size_mode == "margin":
             ms = portfolio.margin_stop_out_price(symbol)
             if ms is not None and self._hit_margin_stop(trade, candle, ms):
                 self._close(portfolio, symbol, index, ms, candle.timestamp, "margin_stop")
@@ -268,7 +289,7 @@ class MultiMarketEngine:
 
         if trade.side == PositionSide.LONG:
             sl, tp = trade.stop_loss, trade.take_profit
-            if sl and candle.low <= sl:
+            if sl_armed and sl and candle.low <= sl:
                 self._close(portfolio, symbol, index, sl, candle.timestamp, "stop_loss")
                 return True
             if tp and candle.high >= tp:
@@ -276,7 +297,7 @@ class MultiMarketEngine:
                 return True
         else:
             sl, tp = trade.stop_loss, trade.take_profit
-            if sl and candle.high >= sl:
+            if sl_armed and sl and candle.high >= sl:
                 self._close(portfolio, symbol, index, sl, candle.timestamp, "stop_loss")
                 return True
             if tp and candle.low <= tp:

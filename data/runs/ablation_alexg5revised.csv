@@ -1,0 +1,3 @@
+rank_input,label,htf_bias,require_chart_trend,require_pattern,require_retest,session,trades,win_rate,return_pct,max_dd_pct,profit_factor,final_equity,rank_pf
+2,bias=off|trend0|pat0|ret0|sess=overlap,off,False,False,False,overlap,401,0.27182,0.000399,0.001386,1.068572,10003.99,1
+1,bias=pair|trend1|pat1|ret0|sess=all,pair,True,True,False,all,0,0.0,0.0,0.0,0.0,10000.0,2
