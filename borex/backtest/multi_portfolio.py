@@ -45,7 +45,9 @@ class MultiMarketPortfolio:
     def _unrealized_pnl(self, trade: Trade, price: float) -> float:
         move = self._pnl_pct(trade, price)
         if self.size_mode == "margin":
-            return trade.margin * move * self.leverage
+            # Margin accounts liquidate at -margin; never mark worse than that
+            # for equity/drawdown (5000x MTM would otherwise fake 100% DD).
+            return max(-trade.margin, trade.margin * move * self.leverage)
         return trade.margin * move
 
     def equity_at_prices(self, prices: dict[str, float]) -> float:
@@ -115,6 +117,7 @@ class MultiMarketPortfolio:
         score: float = 0.0,
         risk_per_trade_pct: float | None = None,
         size_mode: str | None = None,
+        sl_armed_from_index: int | None = None,
     ) -> bool:
         if not self.can_open(symbol):
             return False
@@ -142,6 +145,7 @@ class MultiMarketPortfolio:
             margin=margin,
             entry_cash=entry_cash,
             entry_equity=entry_equity,
+            sl_armed_from_index=sl_armed_from_index,
         )
         return True
 

@@ -11,6 +11,13 @@ from borex.alexg import (
     AlexG4Strategy,
     AlexG5Strategy,
     AlexG6Strategy,
+    AlexG6_1mStrategy,
+    AlexG6aStrategy,
+    AlexG6bStrategy,
+    AlexG7Strategy,
+    AlexG8OptimizedStrategy,
+    AlexG8Strategy,
+    AlexGMarketStrategy,
     AlexGMethodStrategy,
 )
 from borex.alexg.multi_market import default_forex_universe, pick_master_symbol
@@ -51,8 +58,8 @@ def _set_terminal_title(strategy: str, port: int) -> None:
 
 def _parse_leverage(value: str) -> float:
     leverage = float(value)
-    if not 1 <= leverage <= 5000:
-        raise argparse.ArgumentTypeError("leverage debe estar entre 1 y 5000")
+    if not 1 <= leverage <= 50_000:
+        raise argparse.ArgumentTypeError("leverage debe estar entre 1 y 50000")
     return leverage
 
 
@@ -69,7 +76,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "institutional"],
+        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg8", "alexg8optimized", "alexg6-1m", "alexg-market", "institutional"],
         default="alexg2",
     )
     parser.add_argument("--symbol", "-s", default="EURUSD=X")
@@ -80,6 +87,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--leverage", "-l", type=_parse_leverage, default=500.0)
     parser.add_argument("--min-score", type=float, default=70.0)
     parser.add_argument("--min-rr", type=float, default=2.0)
+    parser.add_argument(
+        "--rr-mode",
+        choices=["fixed", "dynamic"],
+        default="fixed",
+        help="RR fijo o dinámico (1/winrate)",
+    )
+    parser.add_argument(
+        "--ltf-intervals",
+        nargs="+",
+        default=["1m"],
+        help="AlexG8: lower TFs for TP-direction confirm at ghost SL",
+    )
+    parser.add_argument(
+        "--ltf-confirm-mode",
+        choices=["any", "all"],
+        default="any",
+        help="AlexG8: any / all LTF confirm mode",
+    )
     parser.add_argument(
         "--rr-factor",
         type=float,
@@ -247,6 +272,69 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             disabled_signals=disabled,
             second_signal=args.second_signal,
         )
+    if args.strategy == "alexg6a":
+        return AlexG6aStrategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+            second_signal=args.second_signal,
+        )
+    if args.strategy == "alexg6b":
+        return AlexG6bStrategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+            second_signal=args.second_signal,
+        )
+    if args.strategy == "alexg7":
+        return AlexG7Strategy(
+            min_rr=args.min_rr,
+            execution_interval=args.interval,
+        )
+    if args.strategy == "alexg8":
+        return AlexG8Strategy(
+            min_rr=args.min_rr,
+            execution_interval=args.interval,
+            ltf_intervals=tuple(args.ltf_intervals),
+            ltf_confirm_mode=args.ltf_confirm_mode,
+        )
+    if args.strategy == "alexg8optimized":
+        return AlexG8OptimizedStrategy(
+            min_rr=args.min_rr,
+            execution_interval=args.interval,
+            ltf_intervals=tuple(args.ltf_intervals),
+            ltf_confirm_mode=args.ltf_confirm_mode,
+        )
+    if args.strategy == "alexg6-1m":
+        return AlexG6_1mStrategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            # Keep 1m-scaled strength_lookback (1440); CLI default 24 is for 1h.
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+            second_signal=args.second_signal,
+        )
+    if args.strategy == "alexg-market":
+        return AlexGMarketStrategy(
+            min_rr=args.min_rr,
+            tp_fraction=args.tp_fraction,
+            strength_lookback=args.strength_lookback,
+            min_currency_edge=args.min_currency_edge,
+            min_confirming_pairs=args.min_confirming_pairs,
+            filter_false_positives=not args.allow_false_positives,
+            disabled_signals=disabled,
+            second_signal="off",
+        )
     if args.strategy == "institutional":
         return InstitutionalFlowStrategy(
             min_score=args.min_score,
@@ -267,11 +355,12 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         position_size_pct=args.position_size,
         true_sl=args.true_sl,
         true_sl_rr=args.min_rr,
+        rr_mode=args.rr_mode,
         rr_factor=args.rr_factor,
     )
-    if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "institutional"):
-        if args.strategy in ("alexg5", "alexg6"):
-            # AlexG5/6 always use margin stop as SL and winrate-derived RR for TP.
+    if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg8", "alexg8optimized", "alexg6-1m", "alexg-market", "institutional"):
+        if args.strategy in ("alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg8", "alexg8optimized", "alexg6-1m", "alexg-market"):
+            # AlexG5/6/7/8 always use margin stop as SL and winrate-derived RR for TP.
             base["size_mode"] = "margin"
             base["true_sl"] = True
             base["rr_factor"] = args.rr_factor
@@ -282,7 +371,7 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
 def run_session(args: argparse.Namespace) -> ViewerSession:
     cache_mode = _cache_mode(args)
 
-    if args.strategy in ("alexg3", "alexg4", "alexg5", "alexg6"):
+    if args.strategy in ("alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg8", "alexg8optimized", "alexg6-1m", "alexg-market"):
         load_path = Path(args.load_analysis) if args.load_analysis else None
         if args.analysis_only and not load_path:
             raise RuntimeError("--analysis-only requires --load-analysis DIR")
@@ -325,6 +414,36 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
                 continue
         master = pick_master_symbol(candles_by_symbol, args.symbol)
         strategy = _build_strategy(args)
+        if isinstance(strategy, AlexG8OptimizedStrategy):
+            strategy.configure_lazy_ltf(args.period, cache_mode)
+            print(
+                "AlexG8Optimized: lazy LTF (load only near SL fills)",
+                flush=True,
+                file=sys.stderr,
+            )
+        elif isinstance(strategy, AlexG8Strategy):
+            ltf_by_symbol: dict = {}
+            for sym in candles_by_symbol:
+                by_tf: dict = {}
+                for tf in strategy.ltf_intervals:
+                    try:
+                        by_tf[tf] = load_market_data(
+                            sym, args.period, tf, cache_mode=cache_mode
+                        )
+                    except Exception as exc:
+                        print(
+                            f"  LTF omitido {sym} {tf}: {exc}",
+                            flush=True,
+                            file=sys.stderr,
+                        )
+                if by_tf:
+                    ltf_by_symbol[sym] = by_tf
+            strategy.attach_ltf(ltf_by_symbol)
+            print(
+                f"AlexG8 LTF attached for {len(ltf_by_symbol)} pairs",
+                flush=True,
+                file=sys.stderr,
+            )
         config = _build_config(args)
 
         analysis: MarketAnalysis | None = None

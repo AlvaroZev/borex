@@ -7,7 +7,7 @@ import sys
 from borex.backtest.costs import TradeCosts, apply_entry_fill, apply_exit_fill, infer_pip_size
 from borex.backtest.margin_stops import (
     margin_stop_out_prices,
-    rr_from_winrate,
+    resolve_rr,
     tighten_sl_to_margin_stop,
     tp_from_sl_rr,
 )
@@ -42,8 +42,9 @@ class BacktestConfig:
     size_mode: str = "fixed_risk"  # fixed_risk | margin
     close_on_opposite_signal: bool = False
     true_sl: bool = False  # SL at margin wipe; TP at true_sl_rr
-    true_sl_rr: float = 2.0
-    rr_factor: float = 1.0  # multiply winrate-derived RR (e.g. 1.1 = 10% wider TP)
+    true_sl_rr: float = 3.0
+    rr_mode: str = "fixed"  # fixed | dynamic (1/winrate)
+    rr_factor: float = 1.0  # TP multiplier on resolved RR (fixed or dynamic)
     spread_pips: float = 0.0
     slippage_pips: float = 0.0
     commission_per_trade: float = 0.0
@@ -86,10 +87,11 @@ class BacktestResult:
             f"Size mode: {self.config.size_mode}",
             f"Margen por trade: {self.config.position_size_pct:.2%} del cash libre",
             f"True SL: {'sí' if self.config.true_sl else 'no'}",
+            f"RR mode: {self.config.rr_mode} (base={self.config.true_sl_rr:g}, factor={self.config.rr_factor:g})",
             f"Invertido: {'sí' if self.config.inversed else 'no'}",
             f"Capital final: ${self.final_equity:,.2f}",
             f"Retorno total: {self.total_return_pct:.2%}",
-            f"Max drawdown: {self.max_drawdown_pct:.2%}",
+            f"Max drawdown: {self.max_drawdown_pct:.2%} (from peak equity)",
             f"Trades: {self.total_trades} (W: {self.winning_trades} / L: {self.losing_trades})",
             f"Win rate: {self.win_rate:.2%}",
         ]
@@ -126,15 +128,43 @@ def _is_late_sl_entry(signal: Signal) -> bool:
     return "|g:" in signal.pattern
 
 
+def _msl_delay_bars(pattern: str) -> int:
+    """Parse |msl_delay:N from pattern (AlexG6b)."""
+    for part in pattern.split("|"):
+        if part.startswith("msl_delay:"):
+            try:
+                return max(0, int(part.split(":", 1)[1]))
+            except ValueError:
+                return 0
+    return 0
+
+
 def _confirmation_signal_from_pattern(pattern: str) -> str:
     parts = pattern.split("|")
     if not parts:
         return "unknown"
     if parts[0] in ("alexg2",) and len(parts) >= 5:
         return parts[4]
-    if parts[0] in ("alexg3", "alexg4", "alexg5", "alexg6") and len(parts) >= 7:
+    # alexg5revised / alexg7 / alexg8: name|symbol|zone_kind|source_tf|pattern|ablation_tag[|g:…]
+    if parts[0] in ("alexg5revised", "alexg7", "alexg8", "alexg8optimized") and len(parts) >= 5:
+        return parts[4]
+    if parts[0] in (
+        "alexg3",
+        "alexg4",
+        "alexg5",
+        "alexg6",
+        "alexg6a",
+        "alexg6b",
+        "alexg6-1m",
+        "alexg-market",
+    ) and len(parts) >= 7:
         return parts[6]
     return parts[-1] if parts[-1] else "unknown"
+
+
+def _late_fill_at_close(pattern: str) -> bool:
+    """AlexG6a: decide at bar close after SL touch → fill at close, not SL wick."""
+    return pattern.startswith("alexg6a|") or "|fill:close" in pattern
 
 
 def _signal_entry(
@@ -145,6 +175,9 @@ def _signal_entry(
         if index >= len(candles):
             return None
         candle = candles[index]
+        # Close-confirm variants: only know the bar at close → fill at close.
+        if _late_fill_at_close(signal.pattern):
+            return index, candle.close, candle.timestamp
         return index, signal.price, candle.timestamp
     if index + 1 >= len(candles):
         return None
@@ -247,6 +280,7 @@ class BacktestEngine:
         symbol: str = "UNKNOWN",
         timeframe: str = "1d",
         mtf: MultiTimeframeContext | None = None,
+        progress_every: int = 0,
     ) -> BacktestResult:
         self._costs = self._trade_costs(symbol)
         self._total_commission = 0.0
@@ -260,10 +294,18 @@ class BacktestEngine:
         equity_curve: list[float] = [portfolio.equity]
         peak_equity = portfolio.equity
         max_dd = 0.0
+        n_bars = len(candles)
 
-        for i in range(len(candles)):
+        for i in range(n_bars):
             if portfolio.liquidated:
                 break
+
+            if progress_every and i > 0 and i % progress_every == 0:
+                print(
+                    f"[backtest] {symbol} {timeframe} bar {i:,}/{n_bars:,} "
+                    f"trades={len(portfolio.closed_trades)}",
+                    flush=True,
+                )
 
             candle = candles[i]
 
@@ -369,9 +411,11 @@ class BacktestEngine:
             exec_price = self._fill_entry(mid_price, side)
             stop_loss = signal.stop_loss
             take_profit = signal.take_profit
-            rr = (
-                rr_from_winrate(portfolio.win_rate, self.config.true_sl_rr)
-                * self.config.rr_factor
+            rr = resolve_rr(
+                rr_mode=self.config.rr_mode,
+                fixed_rr=self.config.true_sl_rr,
+                winrate=portfolio.win_rate,
+                rr_factor=self.config.rr_factor,
             )
 
             # Inverse flips fill side first. Mirror analysis SL/TP onto that
@@ -402,6 +446,8 @@ class BacktestEngine:
             elif stop_loss is not None:
                 take_profit = tp_from_sl_rr(exec_price, stop_loss, side, rr)
 
+            delay = _msl_delay_bars(signal.pattern)
+            sl_armed = (exec_index + delay) if delay > 0 else None
             portfolio.open_position(
                 action,
                 exec_index,
@@ -413,6 +459,7 @@ class BacktestEngine:
                 score=rr,
                 risk_per_trade_pct=self.config.risk_per_trade_pct,
                 size_mode=self.config.size_mode,
+                sl_armed_from_index=sl_armed,
             )
 
     def _mark_equity(self, portfolio: Portfolio, candle: Candle) -> float:
@@ -427,14 +474,16 @@ class BacktestEngine:
         if trade is None:
             return False
 
-        if self.config.size_mode == "margin":
+        sl_armed = trade.sl_is_armed(index)
+
+        if sl_armed and self.config.size_mode == "margin":
             ms_price = portfolio.margin_stop_out_price()
             if ms_price is not None and self._hit_margin_stop(trade, candle, ms_price):
                 self._close_with_costs(
                     portfolio, index, ms_price, candle.timestamp, "margin_stop"
                 )
                 return True
-        else:
+        elif sl_armed:
             liq_price = portfolio.liquidation_price()
             adverse = portfolio.adverse_price(candle.low, candle.high)
             if liq_price is not None and portfolio.is_margin_call_at(adverse):
@@ -454,7 +503,7 @@ class BacktestEngine:
             if tp_price is None and tp:
                 tp_price = trade.entry_price * (1 + tp)
 
-            if sl_price and candle.low <= sl_price:
+            if sl_armed and sl_price and candle.low <= sl_price:
                 self._close_with_costs(
                     portfolio, index, sl_price, candle.timestamp, "stop_loss"
                 )
@@ -472,7 +521,7 @@ class BacktestEngine:
             if tp_price is None and tp:
                 tp_price = trade.entry_price * (1 - tp)
 
-            if sl_price and candle.high >= sl_price:
+            if sl_armed and sl_price and candle.high >= sl_price:
                 self._close_with_costs(
                     portfolio, index, sl_price, candle.timestamp, "stop_loss"
                 )

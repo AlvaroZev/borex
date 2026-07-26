@@ -1,0 +1,41 @@
+{
+  "symbol": "EURUSD=X",
+  "period": "2y",
+  "interval": "1h",
+  "configs": 2,
+  "top": [
+    {
+      "rank_input": 2,
+      "label": "bias=off|trend0|pat0|ret0|sess=overlap",
+      "htf_bias": "off",
+      "require_chart_trend": false,
+      "require_pattern": false,
+      "require_retest": false,
+      "session": "overlap",
+      "trades": 401,
+      "win_rate": 0.27182,
+      "return_pct": 0.000399,
+      "max_dd_pct": 0.001386,
+      "profit_factor": 1.068572,
+      "final_equity": 10003.99,
+      "rank_pf": 1
+    },
+    {
+      "rank_input": 1,
+      "label": "bias=pair|trend1|pat1|ret0|sess=all",
+      "htf_bias": "pair",
+      "require_chart_trend": true,
+      "require_pattern": true,
+      "require_retest": false,
+      "session": "all",
+      "trades": 0,
+      "win_rate": 0.0,
+      "return_pct": 0.0,
+      "max_dd_pct": 0.0,
+      "profit_factor": 0.0,
+      "final_equity": 10000.0,
+      "rank_pf": 2
+    }
+  ],
+  "out": "data\\runs\\ablation_alexg5revised.csv"
+}

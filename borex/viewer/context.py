@@ -23,7 +23,19 @@ def _ts_unix(ts: object) -> int:
     return int(pd.Timestamp(ts).timestamp())
 
 
-_ALEXG_LATE = ("alexg4", "alexg5", "alexg6")
+_ALEXG_LATE = (
+    "alexg4",
+    "alexg5",
+    "alexg6",
+    "alexg6a",
+    "alexg6b",
+    "alexg6-1m",
+    "alexg7",
+    "alexg8",
+    "alexg8optimized",
+    "alexg5revised",
+    "alexg-market",
+)
 
 
 def _parse_ghost_trade(pattern: str, trade: Trade) -> dict[str, Any] | None:
@@ -65,9 +77,9 @@ def _parse_ghost_trade(pattern: str, trade: Trade) -> dict[str, Any] | None:
 
 def _parse_alexg2_pattern(pattern: str) -> dict[str, str]:
     parts = pattern.split("|")
-    if len(parts) < 5 or parts[0] not in ("alexg2", "alexg3", "alexg4", "alexg5", "alexg6"):
+    if len(parts) < 5 or parts[0] not in ("alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg6-1m", "alexg-market"):
         return {}
-    _g3plus = ("alexg3", "alexg4", "alexg5", "alexg6")
+    _g3plus = ("alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg6-1m", "alexg-market")
     out = {
         "trend": parts[3] if parts[0] in _g3plus else parts[1],
         "setup": parts[4] if parts[0] in _g3plus else parts[2],
