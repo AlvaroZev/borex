@@ -134,25 +134,11 @@ class MultiMarketEngine:
                     candidates.append((sym, signal, idx))
 
             candidates.sort(key=lambda x: x[1].score, reverse=True)
-            opened: list[str] = []
             for sym, signal, idx in candidates:
                 if not portfolio.can_open(sym):
                     break
                 self._open_signal(portfolio, sym, signal, idx, candles_by_symbol[sym])
-                if sym in portfolio.open_trades:
-                    opened.append(sym)
 
-            # Same-bar protective exits for fills opened this bar (esp. ghost SL).
-            for sym in opened:
-                idx = ctx.indices.get(sym)
-                if idx is None:
-                    continue
-                self._check_exit(portfolio, sym, idx, candles_by_symbol[sym][idx])
-
-            prices = {
-                sym: candles_by_symbol[sym][idx].close
-                for sym, idx in ctx.indices.items()
-            }
             eq = portfolio.equity_at_prices(prices)
             equity_curve.append(eq)
             peak = max(peak, eq)

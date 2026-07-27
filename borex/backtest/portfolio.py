@@ -86,8 +86,7 @@ class Portfolio:
     def _unrealized_pnl(self, trade: Trade, price: float) -> float:
         move = self._pnl_pct(trade, price)
         if self.size_mode == "margin":
-            # Cap at -margin: stop-out loses the posted margin, not the whole account.
-            return max(-trade.margin, trade.margin * move * self.leverage)
+            return trade.margin * move * self.leverage
         return trade.margin * move
 
     def notional(self, trade: Trade) -> float:
