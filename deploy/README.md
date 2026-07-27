@@ -23,6 +23,16 @@ python mt5service.py --dry-run --strategy alexg7 --leverage 5000 --rr-factor 2.5
 
 ## Deploy host (other Windows PC)
 
+One-shot bootstrap (clone + venv + .env template):
+
+```powershell
+# copy this script onto the host, or clone first then:
+cd C:\borex   # after clone
+powershell -ExecutionPolicy Bypass -File deploy\scripts\bootstrap-host.ps1 -RepoDir C:\borex
+```
+
+Manual steps if you prefer:
+
 1. Install MT5, enable Algo Trading, log into demo.
 2. Clone repo, checkout `ci-cd`, set deploy path secret to that folder.
 3. Copy `deploy/borex_live/.env.example` → `.env` (DATABASE_URL + MT5_*).
@@ -45,6 +55,8 @@ $env:BOREX_DEPLOY_MODE = "native"   # default
 ```
 
 Docker mode (`BOREX_DEPLOY_MODE=docker`) pulls the CI image. Live MT5 orders need **Windows Python + local `terminal64.exe`**; Linux containers cannot import `MetaTrader5`.
+
+Enable OpenSSH Server on the host so Drone's `appleboy/drone-ssh` step can reach it.
 
 ## Drone secrets (Vault paths)
 
