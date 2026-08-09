@@ -863,17 +863,31 @@ class LiveService:
                     if hour_key != self._last_session_status_hour:
                         self._log_trading_session_status(reason="hourly")
                     self.process_once()
-                except Exception:
+                except Exception as exc:
                     logger.exception("live loop error")
-                    # Drop broken pooled DB connections (Railway idle kill, etc.)
-                    try:
-                        bind = getattr(self.session_factory, "bind", None) or self.session_factory.kw.get(
-                            "bind"
+                    # Only recycle DB pool on connection/timeout style failures
+                    msg = str(exc).lower()
+                    if any(
+                        k in msg
+                        for k in (
+                            "timeout",
+                            "ssl connection",
+                            "connection refused",
+                            "server closed",
+                            "terminating connection",
+                            "could not connect",
+                            "operationalerror",
                         )
-                        if bind is not None:
-                            bind.dispose()
-                    except Exception:
-                        logger.exception("failed to dispose DB engine after loop error")
+                    ):
+                        try:
+                            bind = getattr(self.session_factory, "bind", None) or self.session_factory.kw.get(
+                                "bind"
+                            )
+                            if bind is not None:
+                                bind.dispose()
+                                logger.warning("Disposed DB pool after connection error; will retry next poll")
+                        except Exception:
+                            logger.exception("failed to dispose DB engine after loop error")
                 self._stop.wait(poll_seconds)
         finally:
             self.stop()

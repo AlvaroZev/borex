@@ -129,10 +129,25 @@ class LiveCandle(Base):
 
 
 def make_engine(database_url: str):
+    """SQLAlchemy engine tuned for Railway Postgres (idle kills / SSL)."""
+    connect_args: dict = {}
+    if database_url.startswith("postgresql"):
+        # psycopg2 TCP keepalives — reduce "SSL connection has been closed" / idle timeouts
+        connect_args = {
+            "connect_timeout": 30,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        }
     return create_engine(
         database_url,
         pool_pre_ping=True,
-        pool_recycle=280,
+        pool_recycle=180,
+        pool_size=3,
+        max_overflow=2,
+        pool_timeout=30,
+        connect_args=connect_args,
     )
 
 

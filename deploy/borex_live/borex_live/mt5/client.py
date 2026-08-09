@@ -65,7 +65,8 @@ class Mt5Client:
 
     def connect(self) -> None:
         """
-        Connect per official MetaTrader5 Python API.
+        Connect once to MT5. Prefer attaching to an already-open terminal
+        (no shutdown/re-login thrash → no connect sounds).
         https://www.mql5.com/en/docs/python_metatrader5/mt5initialize_py
         """
         if self.dry_run:
@@ -74,24 +75,36 @@ class Mt5Client:
         import MetaTrader5 as mt5
 
         self._mt5 = mt5
+        # Already attached?
+        if self._connected:
+            try:
+                if mt5.terminal_info() is not None and mt5.account_info() is not None:
+                    return
+            except Exception:
+                self._connected = False
+
         path = self.path or r"C:\Program Files\MetaTrader 5\terminal64.exe"
 
-        # Official options: bare initialize → path → credentials
-        ok = bool(mt5.initialize())
+        # 1) Attach to running terminal (quiet). Do NOT shutdown between attempts.
+        ok = bool(mt5.initialize(path=path, timeout=60_000, portable=False))
         if not ok:
-            mt5.shutdown()
-            ok = bool(mt5.initialize(path))
-        if not ok:
-            mt5.shutdown()
-            ok = bool(mt5.initialize(path=path, timeout=60_000, portable=False))
+            ok = bool(mt5.initialize(timeout=60_000))
 
-        if ok and mt5.account_info() is None and self.login and self.password:
-            ok = bool(
-                mt5.login(int(self.login), password=self.password, server=self.server)
-            )
+        # 2) If attached but wrong/empty account, login in-place (no re-init).
+        if ok and self.login and self.password:
+            acc = mt5.account_info()
+            need_login = acc is None or int(acc.login) != int(self.login)
+            if need_login:
+                ok = bool(
+                    mt5.login(
+                        int(self.login),
+                        password=self.password,
+                        server=self.server or None,
+                    )
+                )
 
+        # 3) Last resort: initialize with credentials in one call.
         if not ok and self.login and self.password:
-            mt5.shutdown()
             ok = bool(
                 mt5.initialize(
                     path=path,
@@ -117,8 +130,11 @@ class Mt5Client:
         self._connected = True
 
     def disconnect(self) -> None:
-        if self._mt5 is not None and not self.dry_run:
-            self._mt5.shutdown()
+        if self._mt5 is not None and not self.dry_run and self._connected:
+            try:
+                self._mt5.shutdown()
+            except Exception:
+                pass
         self._connected = False
 
     @property
