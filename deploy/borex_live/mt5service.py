@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--strategy",
         default="alexg7",
-        help="alexg3|alexg4|alexg5|alexg5revised|alexg6|alexg7|alexg8",
+        help="alexg3|alexg4|alexg5|alexg5revised|alexg6|alexg7|alexg7aligned|alexg8",
     )
     p.add_argument("--leverage", "-l", type=float, default=5000.0)
     p.add_argument("--rr-factor", type=float, default=2.5)
@@ -56,13 +56,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--ltf-intervals",
         default="1m",
-        help="AlexG8: comma-separated lower TFs for SL-fill confirm (default: 1m)",
+        help="Unused (legacy LTF); alexg8 no longer confirms on lower TFs",
     )
     p.add_argument(
         "--ltf-confirm-mode",
         choices=["any", "all"],
         default="any",
-        help="AlexG8: any=at least one LTF confirms; all=every LTF must",
+        help="Unused (legacy LTF); alexg8 no longer confirms on lower TFs",
     )
     p.add_argument("--default-lot", type=float, default=0.01)
     p.add_argument("--warmup-bars", type=int, default=300)
@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--poll", type=int, default=30, help="Seconds between bar checks")
     p.add_argument("--db", default="", help="Postgres URL (or DATABASE_URL env)")
     p.add_argument("--mt5-path", default="", help="Path to terminal64.exe")
+    p.add_argument(
+        "--same-bar-exit",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If set, allow SL/TP on the entry bar. Default/--no-same-bar-exit: skip (backtest match)",
+    )
     p.add_argument("--dry-run", action="store_true", help="Log only, no MT5 orders")
     p.add_argument("--borex-main", type=Path, default=None, help="Path to borex-main repo")
     p.add_argument("--tick-once", action="store_true", help="Process one bar and exit")
@@ -110,6 +116,7 @@ def build_config(args: argparse.Namespace) -> LiveServiceConfig:
         symbols=symbols,
         borex_main_root=args.borex_main
         or (Path(os.environ["BOREX_MAIN_ROOT"]) if os.environ.get("BOREX_MAIN_ROOT") else None),
+        same_bar_exit=bool(args.same_bar_exit),
     )
     if args.demo:
         cfg.mt5_login = int(os.environ.get("MT5_LOGIN", "0") or 0)

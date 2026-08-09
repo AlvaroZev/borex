@@ -89,6 +89,18 @@ def video2_ghost() -> AblationConfig:
     )
 
 
+def video2_ghost_all_sessions() -> AblationConfig:
+    """Same as video2_ghost, but allow setups in any session (alexg8)."""
+    return AblationConfig(
+        htf_bias="off",
+        require_chart_trend=False,
+        require_pattern=False,
+        require_retest=False,
+        require_ghost_sl_entry=True,
+        session="all",
+    )
+
+
 def iter_ablation_grid(
     *,
     htf_biases: Iterable[HtfBias] = HTF_BIAS_OPTIONS,

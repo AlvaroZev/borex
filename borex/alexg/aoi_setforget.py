@@ -149,10 +149,18 @@ def build_pip_aoi_zones(
 def aoi_at_close(
     candle: Candle,
     zones: list[PipAOI],
+    *,
+    pad: float = 0.0,
 ) -> PipAOI | None:
-    """Return AOI if close is inside a zone (entry condition)."""
+    """Return AOI if close is inside a zone (entry condition).
+
+    ``pad`` expands each zone by that price amount on both sides — useful when
+    comparing feeds whose closes differ by a few pips.
+    """
     for zone in zones:
-        if zone.contains_close(candle):
+        lo = zone.low - pad
+        hi = zone.high + pad
+        if lo <= candle.close <= hi:
             return zone
     return None
 

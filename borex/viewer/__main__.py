@@ -14,8 +14,8 @@ from borex.alexg import (
     AlexG6_1mStrategy,
     AlexG6aStrategy,
     AlexG6bStrategy,
+    AlexG7AlignedStrategy,
     AlexG7Strategy,
-    AlexG8OptimizedStrategy,
     AlexG8Strategy,
     AlexGMarketStrategy,
     AlexGMethodStrategy,
@@ -26,7 +26,12 @@ from borex.data import build_full_mtf_context, load_csv, load_market_data
 from borex.institutional import InstitutionalFlowStrategy
 from borex.strategy import CandlePatternStrategy
 from borex.strategy.base import Strategy
-from borex.viewer.analysis import MarketAnalysis, scan_alexg3_decisions
+from borex.viewer.analysis import (
+    MarketAnalysis,
+    scan_alexg3_decisions,
+    strategy_params,
+    warn_decision_param_mismatch,
+)
 from borex.viewer.analysis_store import (
     load_analysis_bundle,
     resolve_run_dir,
@@ -76,7 +81,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg8", "alexg8optimized", "alexg6-1m", "alexg-market", "institutional"],
+        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg7aligned", "alexg8", "alexg6-1m", "alexg-market", "institutional"],
         default="alexg2",
     )
     parser.add_argument("--symbol", "-s", default="EURUSD=X")
@@ -97,13 +102,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--ltf-intervals",
         nargs="+",
         default=["1m"],
-        help="AlexG8: lower TFs for TP-direction confirm at ghost SL",
+        help="Unused (legacy); alexg8 has no LTF confirm",
     )
     parser.add_argument(
         "--ltf-confirm-mode",
         choices=["any", "all"],
         default="any",
-        help="AlexG8: any / all LTF confirm mode",
+        help="Unused (legacy); alexg8 has no LTF confirm",
     )
     parser.add_argument(
         "--rr-factor",
@@ -139,6 +144,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=0.01,
         help="Fracción del cash libre como margen (default: 0.01 = 1%%). Usa 0.01 para arriesgar 1%% por trade.",
+    )
+    parser.add_argument(
+        "--commission-per-lot",
+        type=float,
+        default=7.0,
+        help="Round-turn commission USD per 1.0 lot (default: 7.0, ICMarkets-like)",
+    )
+    parser.add_argument(
+        "--commission-per-trade",
+        type=float,
+        default=0.0,
+        help="Flat commission USD added on top of per-lot (default: 0)",
+    )
+    parser.add_argument(
+        "--no-commission",
+        action="store_true",
+        help="Disable commission (overrides --commission-per-lot)",
+    )
+    parser.add_argument(
+        "--risk-include-commission",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Shrink margin so SL price-loss + commission ≈ position-size risk",
     )
     parser.add_argument(
         "--close-on-opposite",
@@ -184,8 +212,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="DIR",
         nargs="?",
         const="",
-        help="Save analysis CSV bundle (decisions, candles, AOI). "
-        "Default: data/runs/{strategy}_{period}_{interval}/",
+        help=(
+            "Save decisions CSV bundle for reuse. "
+            "Default: data/runs/{strategy}_{period}_{interval}/. "
+            "Re-run later with --load-analysis to skip the signal scan."
+        ),
     )
     parser.add_argument(
         "--save-trades",
@@ -198,7 +229,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--load-analysis",
         metavar="DIR",
-        help="Load analysis from saved CSV bundle (skip signal scan)",
+        help=(
+            "Load saved decisions and replay them for the portfolio backtest "
+            "(skips strategy scan). Safe for PnL-only sweeps: capital, leverage, "
+            "commission, rr-factor, position-size, max-positions. "
+            "Re-scan if strategy/min-rr/filters/data change."
+        ),
     )
     parser.add_argument(
         "--analysis-only",
@@ -299,19 +335,18 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
             min_rr=args.min_rr,
             execution_interval=args.interval,
         )
+    if args.strategy == "alexg7aligned":
+        return AlexG7AlignedStrategy(
+            min_rr=args.min_rr,
+            execution_interval=args.interval,
+            # MT5/viewer runs: geometry only unless peer series is attached.
+            peer_blend=0.0,
+        )
     if args.strategy == "alexg8":
         return AlexG8Strategy(
             min_rr=args.min_rr,
             execution_interval=args.interval,
-            ltf_intervals=tuple(args.ltf_intervals),
-            ltf_confirm_mode=args.ltf_confirm_mode,
-        )
-    if args.strategy == "alexg8optimized":
-        return AlexG8OptimizedStrategy(
-            min_rr=args.min_rr,
-            execution_interval=args.interval,
-            ltf_intervals=tuple(args.ltf_intervals),
-            ltf_confirm_mode=args.ltf_confirm_mode,
+            peer_blend=0.0,
         )
     if args.strategy == "alexg6-1m":
         return AlexG6_1mStrategy(
@@ -345,6 +380,12 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
 
 
 def _build_config(args: argparse.Namespace) -> BacktestConfig:
+    commission_per_lot = 0.0 if getattr(args, "no_commission", False) else float(
+        getattr(args, "commission_per_lot", 7.0)
+    )
+    commission_per_trade = 0.0 if getattr(args, "no_commission", False) else float(
+        getattr(args, "commission_per_trade", 0.0)
+    )
     base = dict(
         initial_capital=args.capital,
         leverage=args.leverage,
@@ -357,9 +398,14 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         true_sl_rr=args.min_rr,
         rr_mode=args.rr_mode,
         rr_factor=args.rr_factor,
+        commission_per_lot=commission_per_lot,
+        commission_per_trade=commission_per_trade,
+        risk_include_commission=bool(
+            getattr(args, "risk_include_commission", True)
+        ),
     )
-    if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg8", "alexg8optimized", "alexg6-1m", "alexg-market", "institutional"):
-        if args.strategy in ("alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg8", "alexg8optimized", "alexg6-1m", "alexg-market"):
+    if args.strategy in ("alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg7aligned", "alexg8", "alexg6-1m", "alexg-market", "institutional"):
+        if args.strategy in ("alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg7aligned", "alexg8", "alexg6-1m", "alexg-market"):
             # AlexG5/6/7/8 always use margin stop as SL and winrate-derived RR for TP.
             base["size_mode"] = "margin"
             base["true_sl"] = True
@@ -371,7 +417,7 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
 def run_session(args: argparse.Namespace) -> ViewerSession:
     cache_mode = _cache_mode(args)
 
-    if args.strategy in ("alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg8", "alexg8optimized", "alexg6-1m", "alexg-market"):
+    if args.strategy in ("alexg3", "alexg4", "alexg5", "alexg6", "alexg6a", "alexg6b", "alexg7", "alexg7aligned", "alexg8", "alexg6-1m", "alexg-market"):
         load_path = Path(args.load_analysis) if args.load_analysis else None
         if args.analysis_only and not load_path:
             raise RuntimeError("--analysis-only requires --load-analysis DIR")
@@ -414,39 +460,10 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
                 continue
         master = pick_master_symbol(candles_by_symbol, args.symbol)
         strategy = _build_strategy(args)
-        if isinstance(strategy, AlexG8OptimizedStrategy):
-            strategy.configure_lazy_ltf(args.period, cache_mode)
-            print(
-                "AlexG8Optimized: lazy LTF (load only near SL fills)",
-                flush=True,
-                file=sys.stderr,
-            )
-        elif isinstance(strategy, AlexG8Strategy):
-            ltf_by_symbol: dict = {}
-            for sym in candles_by_symbol:
-                by_tf: dict = {}
-                for tf in strategy.ltf_intervals:
-                    try:
-                        by_tf[tf] = load_market_data(
-                            sym, args.period, tf, cache_mode=cache_mode
-                        )
-                    except Exception as exc:
-                        print(
-                            f"  LTF omitido {sym} {tf}: {exc}",
-                            flush=True,
-                            file=sys.stderr,
-                        )
-                if by_tf:
-                    ltf_by_symbol[sym] = by_tf
-            strategy.attach_ltf(ltf_by_symbol)
-            print(
-                f"AlexG8 LTF attached for {len(ltf_by_symbol)} pairs",
-                flush=True,
-                file=sys.stderr,
-            )
         config = _build_config(args)
 
         analysis: MarketAnalysis | None = None
+        current_params = strategy_params(strategy)
         if load_path:
             print(f"Loading analysis from {load_path}…", flush=True, file=sys.stderr)
             analysis = load_analysis_bundle(load_path, candles_by_symbol)
@@ -455,6 +472,7 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
                 flush=True,
                 file=sys.stderr,
             )
+            warn_decision_param_mismatch(analysis.strategy_params, current_params)
         else:
             print(
                 "Scanning AlexG3 decisions across all markets…",
@@ -464,6 +482,7 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
             analysis = scan_alexg3_decisions(
                 candles_by_symbol, strategy, master_symbol=master
             )
+            analysis.strategy_params = current_params
             print(
                 f"Analysis: {analysis.total_decisions} signals across "
                 f"{len(analysis.symbols)} markets",
@@ -486,6 +505,7 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
                 strategy_name=strategy.name,
                 extra_meta={
                     "period": args.period,
+                    "strategy_params": current_params,
                     "trades_file": TRADES_FILE if args.save_trades is not None else None,
                 },
             )
@@ -493,7 +513,10 @@ def run_session(args: argparse.Namespace) -> ViewerSession:
 
         engine = MultiMarketEngine(strategy, config, max_positions=args.max_positions)
         result = engine.run(
-            candles_by_symbol, timeframe=args.interval, master_symbol=master
+            candles_by_symbol,
+            timeframe=args.interval,
+            master_symbol=master,
+            decisions=analysis.all_decisions,
         )
 
         if args.save_trades is not None:

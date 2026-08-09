@@ -29,6 +29,11 @@
     .badge { font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 4px; background: #243044; color: var(--muted); }
     .badge.ok { color: var(--green); }
     .badge.bad { color: var(--red); }
+    .warn {
+      margin: 0.75rem 1rem 0; padding: 0.55rem 0.75rem; font-size: 0.78rem;
+      color: #fde68a; border: 1px solid #854d0e; background: #1c1917; border-radius: 6px;
+    }
+    .warn li { margin-left: 1.1rem; margin-top: 0.2rem; }
   </style>
 </head>
 <body>
@@ -36,10 +41,12 @@
     <h1>Borex Live Dashboard</h1>
     <nav style="margin-top:0.4rem">
       <a href="/" style="color:#3b82f6;margin-right:0.75rem;text-decoration:none">Dashboard</a>
+      <a href="/markets" style="color:#3b82f6;margin-right:0.75rem;text-decoration:none">Markets</a>
       <a href="/candles" style="color:#3b82f6;text-decoration:none">Live candles</a>
     </nav>
     <div class="meta" id="meta">Loading…</div>
   </header>
+  <div class="warn" id="account-diag" hidden></div>
   <main>
     <section>
       <h2>Pending limits (waiting for SL hit)</h2>
@@ -79,16 +86,32 @@
     async function refresh() {
       const r = await fetch('/api/dashboard');
       const d = await r.json();
+      const a = d.account || {};
       const wr = d.win_rate != null ? (d.win_rate * 100).toFixed(1) + '%' : 'n/a';
+      const eq = a.mt5_equity != null ? a.mt5_equity : a.display_equity;
+      const bal = a.mt5_balance;
+      const mismatch = !!a.mismatch;
       document.getElementById('meta').innerHTML = `
         <span>Strategy: <strong>${esc(d.runtime?.strategy)}</strong></span>
         <span>Entry: <strong>${esc(d.entry_mode)}</strong></span>
-        <span>Cash: <strong>$${(d.cash ?? 0).toFixed(2)}</strong></span>
+        <span>MT5 equity: <strong>${eq == null ? '—' : '$' + (+eq).toFixed(2)}</strong></span>
+        <span>MT5 balance: <strong>${bal == null ? '—' : '$' + (+bal).toFixed(2)}</strong></span>
+        <span>DB cash: <strong>$${(d.cash ?? 0).toFixed(2)}</strong>${mismatch ? ' <span class="badge bad">≠ MT5</span>' : ''}</span>
         <span>WR: <strong>${wr}</strong></span>
         <span>Open: <strong>${(d.open_trades || []).length}</strong></span>
         <span>Pending: <strong>${(d.pending_ghosts || []).length}</strong></span>
         <span>Live bars: <strong>${d.live_candle_count ?? 0}</strong></span>
         <span>MT5: <strong>${d.runtime?.mt5_connected ? 'ok' : 'off'}</strong></span>`;
+
+      const diag = document.getElementById('account-diag');
+      if (mismatch && (a.diagnosis || []).length) {
+        diag.hidden = false;
+        diag.innerHTML = '<strong>Account mismatch</strong><ul>' +
+          (a.diagnosis || []).map(x => `<li>${esc(x)}</li>`).join('') + '</ul>';
+      } else {
+        diag.hidden = true;
+        diag.innerHTML = '';
+      }
 
       const gt = document.querySelector('#ghosts tbody');
       const ghosts = d.pending_ghosts || [];

@@ -85,13 +85,21 @@ def test_alexg7_defaults_to_video2_ghost():
     assert s.ablation.require_ghost_sl_entry is True
 
 
-def test_alexg8_inherits_video2_ghost():
-    from borex.alexg import AlexG8Strategy
+def test_alexg8_is_aligned_all_sessions():
+    from borex.alexg import AlexG7AlignedStrategy, AlexG8Strategy
+    from borex.alexg.ablation import video2_ghost_all_sessions
 
     s = AlexG8Strategy()
     assert s.name == "alexg8"
-    assert s.ablation == video2_ghost()
-    assert s.ltf_intervals == ("1m",)
+    assert s.ablation == video2_ghost_all_sessions()
+    assert s.ablation.session == "all"
+    assert s.ablation.require_ghost_sl_entry is True
+    # Same geometry as alexg7aligned
+    a = AlexG7AlignedStrategy()
+    assert s.ghost_sl_mult == a.ghost_sl_mult
+    assert s.aoi_pad_pips == a.aoi_pad_pips
+    assert s.sl_buffer_pips == a.sl_buffer_pips
+    assert a.ablation.session == "overlap"
 
 
 def test_session_overlap_utc():

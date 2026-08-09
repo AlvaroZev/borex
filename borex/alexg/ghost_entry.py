@@ -55,8 +55,17 @@ class GhostSLEntryMixin:
     sl_near_risk_fraction: float = 0.25
     # Scales |planned_entry − structural_SL| for the resting ghost limit.
     ghost_sl_mult: float = 1.0
+    # Extra pips beyond SL that still count as a fill touch (feed noise).
+    sl_touch_pad_pips: float = 0.0
 
     _pending: dict[str, PendingSetup] = field(default_factory=dict, repr=False)
+
+    def _sl_touch_pad(self, symbol: str = "EURUSD=X") -> float:
+        if self.sl_touch_pad_pips <= 0:
+            return 0.0
+        from borex.backtest.costs import infer_pip_size
+
+        return self.sl_touch_pad_pips * infer_pip_size(symbol)
 
     def _scaled_ghost_sl(
         self,
@@ -73,9 +82,10 @@ class GhostSLEntryMixin:
         return self._sl_risk_distance(pending) * self.sl_near_risk_fraction
 
     def _sl_touched(self, pending: PendingSetup, candle: Candle) -> bool:
+        pad = self._sl_touch_pad()
         if pending.action == SignalAction.BUY:
-            return candle.low <= pending.stop_loss
-        return candle.high >= pending.stop_loss
+            return candle.low <= pending.stop_loss + pad
+        return candle.high >= pending.stop_loss - pad
 
     def _tp_touched(self, pending: PendingSetup, candle: Candle) -> bool:
         if pending.action == SignalAction.BUY:

@@ -13,7 +13,4 @@ data/cache/
 data/*.csv
 data/*.db
 data/*.log
-download/
-deploy/borex_live/logs/
-deploy/borex_live/.venv*/
-*.pid
+*.ex5

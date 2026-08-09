@@ -76,11 +76,11 @@ python mt5service.py --demo --strategy alexg7 --leverage 5000 --rr-factor 2.5 --
   --capital 1000 --position-size 0.01 --interval 1h --port 8790
 ```
 
-AlexG8 (alexg7 + 1m LTF confirm at ghost fill):
+AlexG8 (alexg7aligned geometry, all sessions — no overlap filter):
 
 ```powershell
-python mt5service.py --demo --strategy alexg8 --leverage 5000 --rr-factor 2.5 --min-rr 3.0 `
-  --ltf-intervals 1m --ltf-confirm-mode any
+python mt5service.py --demo --strategy alexg8 --leverage 5000 --rr-factor 1.88 --min-rr 3.0 `
+  --capital 1000 --position-size 0.01 --interval 1h --port 8790
 ```
 
 AlexG6:
@@ -101,8 +101,8 @@ python mt5service.py --dry-run --strategy alexg7 --tick-once --no-ui
 | Strategy | Mode | MT5 behavior |
 |----------|------|----------------|
 | alexg3 | `immediate` | Market order + SL/TP on signal |
-| alexg4/5/6/7/8 | `ghost` | Pending limit at ghost SL when setup queues |
-| alexg8 | `ghost` + LTF | Same, but fill only if 1m (etc.) confirms toward TP |
+| alexg4/5/6/7/7aligned | `ghost` | Pending limit at ghost SL when setup queues |
+| alexg8 | `ghost` | Same as alexg7aligned, but setups in any session |
 
 Future non-ghost strategies: register with `EntryMode.IMMEDIATE` in
 `borex_live/strategy_registry.py`.

@@ -77,44 +77,100 @@ class ExecutionRouter:
         before: dict[str, GhostSnapshot],
         after: dict[str, GhostSnapshot],
     ) -> None:
+        """
+        Keep DB ghosts in sync with strategy._pending.
+
+        Does NOT place MT5 buy/sell limits — fills are decided on closed H1
+        bars (same as backtest), then executed as market orders.
+        """
         if self.entry_mode != EntryMode.GHOST:
             return
 
         for symbol, ghost in after.items():
             if symbol in before:
+                # Refresh stored levels / expiry while ghost is waiting
+                self.repo.upsert_pending_ghost(ghost, mt5_ticket=None)
                 continue
-            self._place_ghost_pending(symbol, ghost)
+            self._queue_ghost_db_only(symbol, ghost)
 
         for symbol in before:
             if symbol not in after:
-                self._cancel_ghost_pending(symbol, "strategy_removed")
+                self._clear_ghost_db(symbol, "strategy_removed")
+
+    def _clear_ghost_db(self, symbol: str, reason: str) -> None:
+        rows = [g for g in self.repo.list_pending_ghosts() if g.symbol == symbol]
+        for row in rows:
+            if row.mt5_ticket:
+                self.mt5.cancel_order(int(row.mt5_ticket))
+            self.repo.invalidate_pending(symbol, reason)
+            logger.info("Cleared ghost %s (%s)", symbol, reason)
 
     def ensure_broker_pendings(self) -> int:
-        """Place any waiting ghosts that have no live MT5 pending ticket."""
+        """Legacy no-op: H1-close mode does not arm resting MT5 limits."""
+        return 0
+
+    def cancel_leftover_broker_pendings(self) -> int:
+        """
+        Cancel any old borex magic pendings left from the previous limit mode.
+        Keeps DB ghosts waiting for H1-close market entry.
+        """
         if self.entry_mode != EntryMode.GHOST:
             return 0
-        placed = 0
+        cancelled = 0
         for row in self.repo.list_pending_ghosts():
             ticket = int(row.mt5_ticket) if row.mt5_ticket else 0
-            if ticket and self.mt5.pending_order_exists(ticket):
+            if ticket > 0 and self.mt5.pending_order_exists(ticket):
+                self.mt5.cancel_order(ticket)
+                cancelled += 1
+                logger.info(
+                    "Cancelled leftover MT5 pending %s ticket=%s (H1-close mode)",
+                    row.symbol,
+                    ticket,
+                )
+            # Clear ticket so we never treat a limit as the fill source
+            if ticket:
+                ghost = GhostSnapshot(
+                    symbol=row.symbol,
+                    action=row.action,
+                    pattern=row.pattern,
+                    stop_loss=row.stop_loss,
+                    take_profit=row.take_profit,
+                    planned_entry=row.planned_entry,
+                    created_index=row.created_index,
+                    expires_index=row.expires_index,
+                    saw_near_sl=row.saw_near_sl,
+                )
+                self.repo.upsert_pending_ghost(ghost, mt5_ticket=None)
+        # Also sweep any magic-tagged pendings not in DB
+        for o in self.mt5.pending_orders():
+            if int(o.get("magic", 0) or 0) != self.mt5.MAGIC:
                 continue
-            # Already filled into a position — leave sync_ghost_fills to book it.
-            if self.mt5.position_for_ghost(row.symbol) is not None:
-                continue
-            ghost = GhostSnapshot(
-                symbol=row.symbol,
-                action=row.action,
-                pattern=row.pattern,
-                stop_loss=row.stop_loss,
-                take_profit=row.take_profit,
-                planned_entry=row.planned_entry,
-                created_index=row.created_index,
-                expires_index=row.expires_index,
-                saw_near_sl=row.saw_near_sl,
+            self.mt5.cancel_order(int(o["ticket"]))
+            cancelled += 1
+            logger.info(
+                "Cancelled orphan borex pending ticket=%s %s",
+                o["ticket"],
+                o.get("symbol"),
             )
-            self._place_ghost_pending(row.symbol, ghost)
-            placed += 1
-        return placed
+        return cancelled
+
+    def _queue_ghost_db_only(self, symbol: str, ghost: GhostSnapshot) -> None:
+        self.repo.upsert_pending_ghost(ghost, mt5_ticket=None)
+        self.repo.log_event(
+            "ghost_queued",
+            f"{symbol} {ghost.action} wait SL={ghost.stop_loss} (no MT5 limit; H1 close)",
+            {
+                "planned_entry": ghost.planned_entry,
+                "take_profit": ghost.take_profit,
+                "expires_index": ghost.expires_index,
+            },
+        )
+        logger.info(
+            "Queued ghost %s %s @ SL %.5f (DB only — enter on closed H1 tag)",
+            symbol,
+            ghost.action,
+            ghost.stop_loss,
+        )
 
     def sync_ghost_fills(
         self,
@@ -213,19 +269,30 @@ class ExecutionRouter:
                 still_open = True
             if still_open:
                 continue
-            # Gone from broker → mark closed (unknown exit; use last entry as proxy)
+            deal_pnl = self.mt5.closed_deal_profit(ticket) if ticket else None
+            if deal_pnl is None:
+                # Fall back to intended 1% risk loss if we cannot read the deal.
+                deal_pnl = -float(trade.expected_loss_usd or trade.margin or 0.0)
             self.repo.close_live_trade(
                 int(trade.id),
                 exit_price=float(trade.entry_price),
                 exit_time="",
                 exit_reason="mt5_closed",
-                pnl=0.0,
+                pnl=float(deal_pnl),
             )
+            pf = self.repo.get_portfolio(0)
+            self.repo.set_cash(float(pf.cash) + float(trade.margin) + float(deal_pnl))
             self.repo.log_event(
                 "trade_closed_broker",
-                f"{trade.symbol} ticket={ticket} missing on MT5",
+                f"{trade.symbol} ticket={ticket} pnl={deal_pnl:.2f}",
+                {"pnl": deal_pnl},
             )
-            logger.info("Reconciled closed on MT5: %s ticket=%s", trade.symbol, ticket)
+            logger.info(
+                "Reconciled closed on MT5: %s ticket=%s pnl=%.2f",
+                trade.symbol,
+                ticket,
+                deal_pnl,
+            )
             closed.append(trade.symbol)
         return closed
 
@@ -261,31 +328,37 @@ class ExecutionRouter:
         )
         if result.ok:
             logger.info(
-                "Placed MT5 pending %s %s @ %.5f (ticket=%s)",
+                "Placed MT5 order %s %s @ %.5f (ticket=%s, sl=%.5f tp=%.5f, %s)",
                 symbol,
                 side,
                 ghost.stop_loss,
                 ticket,
+                prot_sl,
+                prot_tp,
+                result.message or "ok",
             )
         else:
             logger.error(
-                "Failed MT5 pending %s %s @ %.5f: %s (retcode=%s)",
+                "Failed MT5 order %s %s @ %.5f: %s (retcode=%s) prot_sl=%.5f prot_tp=%.5f",
                 symbol,
                 side,
                 ghost.stop_loss,
                 result.message,
                 result.retcode,
+                prot_sl,
+                prot_tp,
             )
 
-    def _cancel_ghost_pending(self, symbol: str, reason: str) -> None:
-        rows = [g for g in self.repo.list_pending_ghosts() if g.symbol == symbol]
-        for row in rows:
-            if row.mt5_ticket:
-                self.mt5.cancel_order(int(row.mt5_ticket))
-            self.repo.invalidate_pending(symbol, reason)
-            logger.info("Cancelled MT5 pending for %s (%s)", symbol, reason)
-
-    def handle_immediate_signal(self, symbol: str, signal: Signal, sl: float, tp: float) -> int | None:
+    def handle_immediate_signal(
+        self,
+        symbol: str,
+        signal: Signal,
+        sl: float,
+        tp: float,
+        *,
+        margin: float,
+        rr_used: float,
+    ) -> int | None:
         if self.entry_mode != EntryMode.IMMEDIATE:
             return None
         side = "buy" if signal.action == SignalAction.BUY else "sell"
@@ -296,6 +369,8 @@ class ExecutionRouter:
             sl,
             tp,
             comment=f"bx_i|{signal.pattern[:20]}",
+            risk_money=margin,
+            rr=rr_used,
         )
         self.repo.log_event(
             "immediate_order",
@@ -322,17 +397,16 @@ class ExecutionRouter:
         expected_loss: float,
         mt5_ticket: int | None = None,
     ) -> None:
-        """Market entry (ghost fill adopt/fallback, immediate, or flip)."""
-        # Already booked (e.g. sync_ghost_fills)
+        """Market entry on closed-bar ghost fill (or immediate signal)."""
         if any(t.symbol == symbol for t in self.repo.open_trades()):
             self.repo.invalidate_pending(symbol, "filled")
             return
 
         side = "buy" if signal.action == SignalAction.BUY else "sell"
         ticket = mt5_ticket
-        if ticket is None and self.entry_mode == EntryMode.GHOST:
-            ticket = self.resolve_ghost_entry_ticket(symbol)
 
+        # H1-close ghost mode: always market-enter now (no resting limits).
+        # Volume is sized so SL ≈ risk_money (1% of equity by default).
         if ticket is None:
             result = self.mt5.place_market_with_sltp(
                 symbol,
@@ -340,13 +414,23 @@ class ExecutionRouter:
                 self.default_lot,
                 sl,
                 tp,
-                comment=f"bx_e|{signal.pattern[:20]}",
+                comment=f"bx_h1|{signal.pattern[:18]}",
+                risk_money=margin,
+                rr=rr_used,
             )
             if not result.ok:
                 self.repo.log_event(
                     "entry_failed",
                     f"{symbol}: {result.message}",
+                    {"retcode": result.retcode, "sl": sl, "tp": tp, "risk": margin},
                     level="error",
+                )
+                logger.error(
+                    "H1-close market entry failed %s %s: %s (retcode=%s)",
+                    symbol,
+                    side,
+                    result.message,
+                    result.retcode,
                 )
                 return
             ticket = result.ticket
@@ -356,9 +440,15 @@ class ExecutionRouter:
         self.repo.invalidate_pending(symbol, "filled")
         entry_price = float(signal.price)
         pos = self.mt5.position_for_ghost(symbol)
+        volume = None
         if pos is not None:
             entry_price = pos.price_open
             ticket = pos.ticket
+            volume = pos.volume
+            if pos.sl:
+                sl = float(pos.sl)
+            if pos.tp:
+                tp = float(pos.tp)
 
         self.repo.open_live_trade(
             symbol=symbol,
@@ -376,6 +466,23 @@ class ExecutionRouter:
         )
         self.repo.log_event(
             "trade_opened",
-            f"{symbol} {side} ticket={ticket}",
-            {"sl": sl, "tp": tp, "rr": rr_used},
+            f"{symbol} {side} ticket={ticket} (H1-close market)",
+            {
+                "sl": sl,
+                "tp": tp,
+                "rr": rr_used,
+                "risk": margin,
+                "volume": volume,
+                "signal_price": float(signal.price),
+            },
+        )
+        logger.info(
+            "Opened %s %s @ %.5f ticket=%s vol=%s risk=%.2f (signal/ghost SL was %.5f)",
+            symbol,
+            side,
+            entry_price,
+            ticket,
+            f"{volume:.2f}" if volume is not None else "?",
+            margin,
+            float(signal.price),
         )

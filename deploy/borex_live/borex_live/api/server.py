@@ -23,6 +23,10 @@ def create_app() -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(_static / "live.html")
 
+    @app.get("/markets")
+    def markets_page() -> FileResponse:
+        return FileResponse(_static / "markets.html")
+
     @app.get("/candles")
     def candles_page() -> FileResponse:
         return FileResponse(_static / "candles.html")
@@ -41,6 +45,15 @@ def create_app() -> FastAPI:
             return _service.dashboard_payload()
         except Exception as exc:
             raise HTTPException(500, f"dashboard failed: {exc}") from exc
+
+    @app.get("/api/markets")
+    def markets():
+        if _service is None:
+            raise HTTPException(503, "Service not started")
+        try:
+            return _service.markets_payload()
+        except Exception as exc:
+            raise HTTPException(500, f"markets failed: {exc}") from exc
 
     @app.get("/api/live-candles")
     def live_candles_index():

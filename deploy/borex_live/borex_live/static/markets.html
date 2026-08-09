@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Borex Live — Markets</title>
+  <style>
+    :root {
+      --bg: #0f1419; --panel: #1a2332; --border: #2d3a4f;
+      --text: #e7ecf3; --muted: #8b9cb3; --green: #22c55e; --red: #ef4444;
+      --accent: #3b82f6; --yellow: #fbbf24;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    header {
+      padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); background: var(--panel);
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; }
+    nav { margin-top: 0.4rem; }
+    nav a { color: var(--accent); text-decoration: none; font-size: 0.85rem; margin-right: 0.85rem; }
+    nav a:hover { text-decoration: underline; }
+    nav a.active { color: var(--text); font-weight: 600; }
+    .meta { display: flex; flex-wrap: wrap; gap: 0.85rem; margin-top: 0.55rem; font-size: 0.82rem; color: var(--muted); }
+    .meta strong { color: var(--text); }
+    .note {
+      margin: 0.75rem 1.25rem 0; padding: 0.55rem 0.75rem; font-size: 0.78rem; color: var(--muted);
+      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    }
+    .note.warn {
+      color: #fde68a; border-color: #854d0e; background: #1c1917;
+    }
+    .note.warn li { margin-left: 1.1rem; margin-top: 0.2rem; }
+    main { padding: 1rem 1.25rem 2rem; display: grid; gap: 1rem; }
+    section {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      padding: 0.85rem 1rem; overflow-x: auto;
+    }
+    h2 {
+      font-size: 0.8rem; margin-bottom: 0.65rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.04em;
+      display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+    }
+    h2 .count { color: var(--text); font-weight: 600; letter-spacing: 0; text-transform: none; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.76rem; }
+    th, td { text-align: left; padding: 0.38rem 0.35rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+    .ghost { color: var(--yellow); }
+    .open { color: var(--accent); }
+    .win { color: var(--green); }
+    .loss { color: var(--red); }
+    .muted { color: var(--muted); }
+    .badge {
+      font-size: 0.68rem; padding: 0.1rem 0.35rem; border-radius: 4px;
+      background: #243044; color: var(--muted);
+    }
+    .badge.bad { color: var(--red); }
+    .side-buy { color: var(--green); font-weight: 600; }
+    .side-sell { color: var(--red); font-weight: 600; }
+    .sub { font-size: 0.68rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Borex Live — All Markets</h1>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/markets" class="active">Markets</a>
+      <a href="/candles">Live candles</a>
+    </nav>
+    <div class="meta" id="meta">Loading…</div>
+  </header>
+  <p class="note" id="note"></p>
+  <div class="note" id="account-diag" hidden></div>
+  <main>
+    <section>
+      <h2>
+        <span>Ghosts waiting for SL</span>
+        <span class="count" id="ghost-count">0</span>
+      </h2>
+      <table id="ghosts">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Last</th>
+            <th>Ghost SL</th>
+            <th>Dist</th>
+            <th>Hyp entry (=SL)</th>
+            <th>Hyp SL</th>
+            <th>Hyp TP</th>
+            <th>RR</th>
+            <th>If SL</th>
+            <th>If TP</th>
+            <th>Pattern</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>
+        <span>Open positions</span>
+        <span class="count" id="open-count">0</span>
+      </h2>
+      <table id="opens">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Entry</th>
+            <th>SL</th>
+            <th>TP</th>
+            <th>Vol</th>
+            <th>Float</th>
+            <th>If SL</th>
+            <th>If TP</th>
+            <th>RR</th>
+            <th>Ticket</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+    const n = (v, d=5) => (v == null || Number.isNaN(+v)) ? '—' : (+v).toFixed(d);
+    const usd = (v) => {
+      if (v == null || Number.isNaN(+v)) return '—';
+      const x = +v;
+      return (x >= 0 ? '+' : '') + '$' + x.toFixed(2);
+    };
+    const sideCls = (s) => String(s||'').toLowerCase().startsWith('b') ? 'side-buy' : 'side-sell';
+
+    async function refresh() {
+      const r = await fetch('/api/markets');
+      if (!r.ok) throw new Error('markets ' + r.status);
+      const d = await r.json();
+      const a = d.account || {};
+      const wr = d.win_rate != null ? (d.win_rate * 100).toFixed(1) + '%' : 'n/a';
+      const eq = a.mt5_equity != null ? a.mt5_equity : a.display_equity;
+      const bal = a.mt5_balance;
+      const src = a.source === 'mt5' ? 'MT5' : 'DB';
+      const mismatch = !!a.mismatch;
+      document.getElementById('meta').innerHTML = `
+        <span>Strategy: <strong>${esc(d.runtime?.strategy)}</strong></span>
+        <span>Leverage: <strong>${esc(d.leverage)}×</strong></span>
+        <span>RR: <strong>${n(d.rr, 2)}</strong></span>
+        <span>Risk/trade: <strong>${usd(d.risk_usd)}</strong> (${((d.position_size_pct||0)*100).toFixed(0)}% of ${src})</span>
+        <span>MT5 equity: <strong>${eq == null ? '—' : '$' + (+eq).toFixed(2)}</strong></span>
+        <span>MT5 balance: <strong>${bal == null ? '—' : '$' + (+bal).toFixed(2)}</strong></span>
+        <span>DB cash: <strong>$${(d.cash ?? 0).toFixed(2)}</strong>${mismatch ? ' <span class="badge bad">≠ MT5</span>' : ''}</span>
+        <span>WR: <strong>${wr}</strong></span>
+        <span>MT5: <strong>${d.runtime?.mt5_connected ? 'ok' : 'off'}</strong></span>`;
+      document.getElementById('note').textContent = d.note || '';
+
+      const diag = document.getElementById('account-diag');
+      if (mismatch && (a.diagnosis || []).length) {
+        diag.hidden = false;
+        diag.className = 'note warn';
+        diag.innerHTML = '<strong>Account mismatch</strong><ul>' +
+          (a.diagnosis || []).map(x => `<li>${esc(x)}</li>`).join('') + '</ul>';
+      } else {
+        diag.hidden = true;
+        diag.innerHTML = '';
+      }
+
+      const ghosts = d.ghosts || [];
+      document.getElementById('ghost-count').textContent = ghosts.length + ' waiting';
+      document.querySelector('#ghosts tbody').innerHTML = ghosts.map(g => `
+        <tr class="ghost">
+          <td>${esc(g.symbol)}</td>
+          <td class="${sideCls(g.side)}">${esc(g.side)}</td>
+          <td>${n(g.last_price)}</td>
+          <td>${n(g.ghost_sl)}</td>
+          <td>${g.dist_to_sl_pct == null ? '—' : n(g.dist_to_sl_pct, 3) + '%'}</td>
+          <td>${n(g.hyp_entry)}</td>
+          <td>${n(g.hyp_sl)}</td>
+          <td>${n(g.hyp_tp)}</td>
+          <td>${n(g.rr, 2)}</td>
+          <td class="loss">${usd(g.expected_loss_usd != null ? -Math.abs(g.expected_loss_usd) : null)}</td>
+          <td class="win">${usd(g.expected_win_usd)}</td>
+          <td class="sub" title="${esc(g.pattern)}">${esc((g.pattern||'').split('|').slice(0,5).join('|'))}</td>
+        </tr>`).join('') || '<tr><td colspan="12" class="muted">No waiting ghosts</td></tr>';
+
+      const opens = d.open_positions || [];
+      document.getElementById('open-count').textContent = opens.length + ' open';
+      document.querySelector('#opens tbody').innerHTML = opens.map(t => {
+        const pnl = t.floating_pnl;
+        const pnlCls = pnl == null ? '' : (pnl >= 0 ? 'win' : 'loss');
+        const stale = t.stale ? ' <span class="badge bad">stale</span>' : '';
+        return `<tr class="open">
+          <td>${esc(t.symbol)}${stale}</td>
+          <td class="${sideCls(t.side)}">${esc(t.side)}</td>
+          <td>${n(t.entry_price)}</td>
+          <td>${n(t.stop_loss)}</td>
+          <td>${n(t.take_profit)}</td>
+          <td>${t.volume == null ? '—' : n(t.volume, 2)}</td>
+          <td class="${pnlCls}">${usd(pnl)}</td>
+          <td class="loss">${usd(t.pnl_if_sl)}</td>
+          <td class="win">${usd(t.pnl_if_tp)}</td>
+          <td>${n(t.rr_used, 2)}</td>
+          <td>${esc(t.mt5_ticket ?? '—')}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="11" class="muted">No open positions</td></tr>';
+    }
+
+    refresh().catch(e => {
+      document.getElementById('meta').textContent = 'Failed: ' + e.message;
+    });
+    setInterval(() => refresh().catch(() => {}), 5000);
+  </script>
+</body>
+</html>

@@ -53,6 +53,7 @@ class LiveService:
         self._stop = threading.Event()
         self._runtime: dict[str, Any] = {"status": "init"}
         self._strategy: Any = None
+        self._last_session_status_hour: str | None = None
 
     @property
     def runtime(self) -> dict[str, Any]:
@@ -166,11 +167,13 @@ class LiveService:
                 default_lot=self.cfg.default_lot,
                 dry_run=self.mt5.dry_run,
             )
-            # Restore ghosts into strategy, then make sure each has an MT5 pending
-            # limit parked at the ghost SL so fills happen automatically.
-            n_pending = router.ensure_broker_pendings()
-            if n_pending:
-                logger.info("Armed %d MT5 pending ghost orders at SL", n_pending)
+            # H1-close mode: ghosts wait in DB; cancel any old MT5 limits.
+            n_cancel = router.cancel_leftover_broker_pendings()
+            if n_cancel:
+                logger.info(
+                    "Cancelled %d leftover MT5 pending(s); using H1-close market entry",
+                    n_cancel,
+                )
             self.engine = LiveEngine(strategy, self.cfg, repo, router, spec.entry_mode)
             session.commit()
 
@@ -180,6 +183,8 @@ class LiveService:
                 "status": "running",
                 "strategy": self.cfg.strategy,
                 "entry_mode": spec.entry_mode.value,
+                "ghost_entry": "h1_close_market",
+                "same_bar_exit": self.cfg.same_bar_exit,
                 "master": self.master_symbol,
                 "symbols": symbols,
                 "mt5_connected": self.mt5.connected,
@@ -187,11 +192,66 @@ class LiveService:
             }
         )
         logger.info(
-            "Live service started | %s | entry_mode=%s | master=%s",
+            "Live service started | %s | entry_mode=%s | ghost=H1-close-market | "
+            "same_bar_exit=%s | master=%s",
             self.cfg.strategy,
             spec.entry_mode.value,
+            "on" if self.cfg.same_bar_exit else "off",
             self.master_symbol,
         )
+        self._log_trading_session_status(reason="startup")
+
+    def _strategy_session_filter(self) -> str:
+        """Ablation session pill (alexg5revised+); default all if absent."""
+        strat = self._strategy
+        if strat is None:
+            return "unknown"
+        abl = getattr(strat, "ablation", None)
+        if abl is None:
+            return "all"
+        return str(getattr(abl, "session", "all") or "all").lower()
+
+    def _log_trading_session_status(self, *, reason: str = "hourly") -> None:
+        """Log whether new setups are allowed under the strategy session filter."""
+        from datetime import datetime, timezone
+
+        from borex.alexg.sessions import TradingSession, in_session
+
+        now = datetime.now(timezone.utc)
+        filt = self._strategy_session_filter()
+        window_hints = {
+            "asia": "00:00-09:00 UTC",
+            "london": "07:00-16:00 UTC",
+            "newyork": "12:00-21:00 UTC",
+            "overlap": "12:00-16:00 UTC (London–NY)",
+            "all": "no restriction",
+        }
+        hint = window_hints.get(filt, "")
+        if filt == "all":
+            active = True
+            detail = "IN session — filter=all (new setups anytime)"
+        elif filt == "unknown":
+            active = True
+            detail = "session filter unknown (assuming open)"
+        else:
+            active = in_session(now, TradingSession(filt))
+            detail = (
+                "IN session — new setups allowed"
+                if active
+                else "OUT of session — new setups blocked (queued ghosts may still fill)"
+            )
+        logger.info(
+            "Trading session [%s]: filter=%s%s | now=%s UTC | %s",
+            reason,
+            filt,
+            f" ({hint})" if hint else "",
+            now.strftime("%Y-%m-%d %H:%M"),
+            detail,
+        )
+        self._runtime["session_filter"] = filt
+        self._runtime["session_window"] = hint
+        self._runtime["in_trading_session"] = active
+        self._last_session_status_hour = now.strftime("%Y-%m-%d %H")
 
     def stop(self) -> None:
         self._stop.set()
@@ -258,7 +318,7 @@ class LiveService:
 
         self._refresh_ltf()
 
-        # Always keep ghost SL limits on the broker and book early fills.
+        # Reconcile broker positions; do not arm resting ghost limits.
         ghost_fills: list[str] = []
         with self._session() as session:
             repo = StateRepository(session)
@@ -271,7 +331,8 @@ class LiveService:
             )
             self.engine.repo = repo
             self.engine.router = router
-            router.ensure_broker_pendings()
+            router.cancel_leftover_broker_pendings()
+            # If a position somehow exists for a DB ghost (manual / old limit), book it.
             margin = self.engine._margin_for_entry()
             ghost_fills = router.sync_ghost_fills(
                 margin=margin,
@@ -281,6 +342,7 @@ class LiveService:
             )
             for _ in ghost_fills:
                 repo.set_cash(repo.get_portfolio(self.cfg.capital).cash - margin)
+            router.reconcile_open_with_mt5()
             session.commit()
 
         started = self._live_started_at or pd.Timestamp.now(tz="UTC")
@@ -572,13 +634,234 @@ class LiveService:
         snap["pending_ghosts"] = enriched_ghosts
         snap["runtime"] = self.runtime
         snap["entry_mode"] = self.runtime.get("entry_mode")
+        snap["account"] = self._account_live_snapshot(
+            db_cash=float(snap.get("cash") or 0.0),
+            open_trades=open_merged,
+            closed_trades=snap.get("closed_trades") or [],
+        )
         return snap
+
+    def _account_live_snapshot(
+        self,
+        *,
+        db_cash: float,
+        open_trades: list[dict[str, Any]],
+        closed_trades: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Prefer MT5 balance/equity; explain DB cash drift when they diverge."""
+        out: dict[str, Any] = {
+            "db_cash": float(db_cash),
+            "mt5_balance": None,
+            "mt5_equity": None,
+            "mt5_margin": None,
+            "mt5_free_margin": None,
+            "mt5_floating": None,
+            "mt5_login": None,
+            "source": "db",
+            "display_equity": float(db_cash),
+            "mismatch": False,
+            "delta_db_minus_mt5": None,
+            "diagnosis": [],
+        }
+        if not (self.mt5.connected and not self.mt5.dry_run):
+            out["diagnosis"] = ["MT5 not connected — showing DB paper cash only."]
+            return out
+
+        try:
+            info = self.mt5._mt5.account_info() if self.mt5._mt5 is not None else None
+        except Exception:
+            info = None
+        if info is None:
+            try:
+                bal = float(self.mt5.account_balance())
+                eq = float(self.mt5.account_equity())
+            except Exception:
+                out["diagnosis"] = ["Could not read MT5 account_info."]
+                return out
+            out["mt5_balance"] = bal
+            out["mt5_equity"] = eq
+            out["mt5_free_margin"] = float(self.mt5.account_free_margin())
+        else:
+            out["mt5_balance"] = float(getattr(info, "balance", 0.0) or 0.0)
+            out["mt5_equity"] = float(getattr(info, "equity", 0.0) or out["mt5_balance"])
+            out["mt5_margin"] = float(getattr(info, "margin", 0.0) or 0.0)
+            out["mt5_free_margin"] = float(getattr(info, "margin_free", 0.0) or 0.0)
+            out["mt5_floating"] = float(getattr(info, "profit", 0.0) or 0.0)
+            out["mt5_login"] = int(getattr(info, "login", 0) or 0)
+
+        eq = float(out["mt5_equity"] or 0.0)
+        bal = float(out["mt5_balance"] or 0.0)
+        out["source"] = "mt5"
+        out["display_equity"] = eq if eq > 0 else bal
+        delta = float(db_cash) - eq
+        out["delta_db_minus_mt5"] = delta
+        out["mismatch"] = abs(delta) > max(1.0, 0.002 * max(eq, 1.0))  # >$1 or >0.2%
+
+        if not out["mismatch"]:
+            out["diagnosis"] = ["DB cash matches MT5 equity within tolerance."]
+            return out
+
+        reasons: list[str] = [
+            f"DB cash ${db_cash:.2f} ≠ MT5 equity ${eq:.2f} (Δ ${delta:+.2f})."
+        ]
+        closed_pnl = sum(float(t.get("pnl") or 0.0) for t in closed_trades)
+        zero_broker = [
+            t for t in closed_trades
+            if str(t.get("exit_reason") or "") == "mt5_closed" and abs(float(t.get("pnl") or 0.0)) < 1e-9
+        ]
+        open_margin = sum(float(t.get("margin") or 0.0) for t in open_trades if not t.get("stale"))
+        reasons.append(f"DB closed PnL sum ${closed_pnl:+.2f} across {len(closed_trades)} trades.")
+        if zero_broker:
+            reasons.append(
+                f"{len(zero_broker)} broker closes booked at pnl=0 (old reconcile) — "
+                "DB never applied real MT5 deal PnL."
+            )
+        if open_margin > 0:
+            reasons.append(f"DB still locks ${open_margin:.2f} margin on open/stale rows.")
+        # Expected rough reconstruct: initial + closed pnl - open margin
+        initial = float(self.cfg.capital)
+        expected_db = initial + closed_pnl - open_margin
+        reasons.append(
+            f"DB reconstruct ≈ initial ${initial:.2f} + closed ${closed_pnl:+.2f} "
+            f"- open margin ${open_margin:.2f} = ${expected_db:.2f}."
+        )
+        reasons.append(
+            "UI uses MT5 equity for risk/display; DB cash is paper bookkeeping only."
+        )
+        out["diagnosis"] = reasons
+        return out
+
+    def markets_payload(self) -> dict[str, Any]:
+        """
+        Viewer-style all-markets snapshot.
+
+        Ghost rows include a *display-only* what-if: entry assumed at ghost SL,
+        with true-SL protective levels (does not change live entry logic).
+        Open rows include expected PnL if SL or TP is hit.
+        """
+        from borex.backtest.margin_stops import margin_stop_out_prices, resolve_rr
+        from borex.backtest.portfolio import PositionSide
+
+        dash = self.dashboard_payload()
+        account = dash.get("account") or {}
+        wr = dash.get("win_rate")
+        rr = resolve_rr(
+            rr_mode="dynamic",
+            fixed_rr=self.cfg.min_rr,
+            winrate=wr,
+            rr_factor=self.cfg.rr_factor,
+        )
+        live_equity = float(account.get("display_equity") or 0.0)
+        if live_equity <= 0:
+            live_equity = float(dash.get("cash") or self.cfg.capital)
+        risk_usd = live_equity * self.cfg.position_size_pct
+
+        ghosts_out: list[dict[str, Any]] = []
+        for g in dash.get("pending_ghosts") or []:
+            side_raw = str(g.get("action") or "buy").lower()
+            side = PositionSide.LONG if side_raw in ("buy", "long") else PositionSide.SHORT
+            ghost_sl = float(g.get("stop_loss") or 0.0)
+            hyp_entry = ghost_sl  # display-only: assume fill at ghost trigger
+            hyp_sl, hyp_tp = (None, None)
+            if hyp_entry > 0:
+                hyp_sl, hyp_tp = margin_stop_out_prices(
+                    hyp_entry, side, self.cfg.leverage, rr
+                )
+
+            last = None
+            series = self.candles_by_symbol.get(g["symbol"]) or []
+            if series:
+                last = float(series[-1].close)
+            dist = None
+            dist_pct = None
+            if last is not None and ghost_sl > 0:
+                dist = abs(last - ghost_sl)
+                dist_pct = dist / last * 100.0
+
+            ghosts_out.append(
+                {
+                    "symbol": g["symbol"],
+                    "side": "buy" if side == PositionSide.LONG else "sell",
+                    "pattern": g.get("pattern") or "",
+                    "ghost_sl": ghost_sl,
+                    "planned_entry": g.get("planned_entry"),
+                    "last_price": last,
+                    "dist_to_sl": dist,
+                    "dist_to_sl_pct": dist_pct,
+                    # Display-only what-if (entry = ghost SL)
+                    "hyp_entry": hyp_entry,
+                    "hyp_sl": hyp_sl,
+                    "hyp_tp": hyp_tp,
+                    "rr": rr,
+                    "risk_usd": risk_usd,
+                    "expected_loss_usd": risk_usd,
+                    "expected_win_usd": risk_usd * rr,
+                    "expires_index": g.get("expires_index"),
+                    "status": g.get("status"),
+                }
+            )
+
+        opens_out: list[dict[str, Any]] = []
+        for t in dash.get("open_trades") or []:
+            exp_loss = t.get("expected_loss_usd")
+            exp_win = t.get("expected_win_usd")
+            if exp_loss is None:
+                exp_loss = t.get("margin") or risk_usd
+            if exp_win is None:
+                rr_used = float(t.get("rr_used") or rr or 0.0)
+                exp_win = float(exp_loss) * rr_used
+            opens_out.append(
+                {
+                    "symbol": t.get("symbol"),
+                    "side": t.get("side"),
+                    "entry_price": t.get("entry_price"),
+                    "stop_loss": t.get("stop_loss"),
+                    "take_profit": t.get("take_profit"),
+                    "volume": t.get("volume"),
+                    "floating_pnl": t.get("floating_pnl"),
+                    "mt5_ticket": t.get("mt5_ticket"),
+                    "margin": t.get("margin"),
+                    "rr_used": t.get("rr_used"),
+                    "pattern": t.get("pattern") or "",
+                    "stale": bool(t.get("stale")),
+                    "pnl_if_sl": -abs(float(exp_loss or 0.0)),
+                    "pnl_if_tp": float(exp_win or 0.0),
+                    "source": t.get("source"),
+                }
+            )
+
+        ghosts_out.sort(key=lambda x: (x.get("dist_to_sl_pct") is None, x.get("dist_to_sl_pct") or 9e9))
+        opens_out.sort(key=lambda x: str(x.get("symbol") or ""))
+
+        return {
+            "runtime": dash.get("runtime"),
+            "entry_mode": dash.get("entry_mode"),
+            "cash": dash.get("cash"),
+            "account": account,
+            "win_rate": wr,
+            "rr": rr,
+            "leverage": self.cfg.leverage,
+            "risk_usd": risk_usd,
+            "position_size_pct": self.cfg.position_size_pct,
+            "note": (
+                "Ghost hyp_entry/hyp_sl/hyp_tp assume fill at ghost SL for display only; "
+                "live still market-enters on H1-close confirmation. "
+                "Header equity/risk use MT5 when connected."
+            ),
+            "ghosts": ghosts_out,
+            "open_positions": opens_out,
+            "closed_trades": dash.get("closed_trades") or [],
+        }
 
     def run_loop(self, poll_seconds: int = 30) -> None:
         self.start()
         try:
             while not self._stop.is_set():
                 try:
+                    now = pd.Timestamp.now(tz="UTC")
+                    hour_key = now.strftime("%Y-%m-%d %H")
+                    if hour_key != self._last_session_status_hour:
+                        self._log_trading_session_status(reason="hourly")
                     self.process_once()
                 except Exception:
                     logger.exception("live loop error")

@@ -19,7 +19,7 @@ class LiveServiceConfig:
     interval: str = "1h"
     master_yahoo: str = "EURUSD=X"
     second_signal: str = "off"
-    # alexg8: LTF confirm at ghost SL fill (MT5 1m by default).
+    # alexg8: LTF fields kept for CLI compat; unused by current alexg8.
     ltf_intervals: tuple[str, ...] = ("1m",)
     ltf_confirm_mode: str = "any"
     ltf_warmup_bars: int = 500
@@ -35,6 +35,8 @@ class LiveServiceConfig:
     mt5_server: str = ""
     symbols: list[str] = field(default_factory=list)
     borex_main_root: Path | None = None
+    # False = do not evaluate SL/TP on the entry bar (matches backtest default).
+    same_bar_exit: bool = False
 
     @classmethod
     def from_env(cls) -> LiveServiceConfig:

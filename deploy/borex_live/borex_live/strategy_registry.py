@@ -33,6 +33,7 @@ def build_strategy_registry() -> dict[str, StrategySpec]:
         AlexG5Strategy,
         AlexG5RevisedStrategy,
         AlexG6Strategy,
+        AlexG7AlignedStrategy,
         AlexG7Strategy,
         AlexG8Strategy,
     )
@@ -68,15 +69,16 @@ def build_strategy_registry() -> dict[str, StrategySpec]:
             execution_interval=kw.get("execution_interval", "1h"),
         )
 
+    def g7aligned(**kw):
+        return AlexG7AlignedStrategy(
+            min_rr=kw.get("min_rr", 3.0),
+            execution_interval=kw.get("execution_interval", "1h"),
+        )
+
     def g8(**kw):
-        intervals = kw.get("ltf_intervals", ("1m",))
-        if isinstance(intervals, str):
-            intervals = tuple(intervals.split(","))
         return AlexG8Strategy(
             min_rr=kw.get("min_rr", 3.0),
             execution_interval=kw.get("execution_interval", "1h"),
-            ltf_intervals=tuple(intervals),
-            ltf_confirm_mode=kw.get("ltf_confirm_mode", "any"),
         )
 
     return {
@@ -86,6 +88,7 @@ def build_strategy_registry() -> dict[str, StrategySpec]:
         "alexg5revised": StrategySpec("alexg5revised", EntryMode.GHOST, g5r),
         "alexg6": StrategySpec("alexg6", EntryMode.GHOST, g6),
         "alexg7": StrategySpec("alexg7", EntryMode.GHOST, g7),
+        "alexg7aligned": StrategySpec("alexg7aligned", EntryMode.GHOST, g7aligned),
         "alexg8": StrategySpec("alexg8", EntryMode.GHOST, g8),
     }
 

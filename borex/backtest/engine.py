@@ -48,6 +48,13 @@ class BacktestConfig:
     spread_pips: float = 0.0
     slippage_pips: float = 0.0
     commission_per_trade: float = 0.0
+    # Round-turn USD per 1.0 standard lot (notional = lot_notional).
+    commission_per_lot: float = 0.0
+    # Min USD commission per deal/side (ICMarkets demo micros ≈ $0.04).
+    min_commission_per_side: float = 0.04
+    lot_notional: float = 100_000.0
+    # Shrink margin so price-SL loss + commission ≈ position_size_pct risk.
+    risk_include_commission: bool = True
     pip_size: float | None = None  # auto desde símbolo si None
 
 
@@ -91,7 +98,7 @@ class BacktestResult:
             f"Invertido: {'sí' if self.config.inversed else 'no'}",
             f"Capital final: ${self.final_equity:,.2f}",
             f"Retorno total: {self.total_return_pct:.2%}",
-            f"Max drawdown: {self.max_drawdown_pct:.2%} (from peak equity)",
+            f"Max drawdown: {self.max_drawdown_pct:.2%}",
             f"Trades: {self.total_trades} (W: {self.winning_trades} / L: {self.losing_trades})",
             f"Win rate: {self.win_rate:.2%}",
         ]
@@ -106,11 +113,14 @@ class BacktestResult:
             self.config.spread_pips
             or self.config.slippage_pips
             or self.config.commission_per_trade
+            or self.config.commission_per_lot
         ):
             lines.append(
                 f"Costos: spread {self.config.spread_pips:g} pips | "
                 f"slippage {self.config.slippage_pips:g} pips | "
-                f"comisión ${self.config.commission_per_trade:.2f}/trade"
+                f"comisión ${self.config.commission_per_trade:.2f}/trade | "
+                f"${self.config.commission_per_lot:.2f}/lot"
+                f"{' (risk net of commission)' if self.config.risk_include_commission else ''}"
             )
             lines.append(f"Comisión total pagada: ${self.total_commission:,.2f}")
         if self.confirmation_stats:
@@ -146,7 +156,7 @@ def _confirmation_signal_from_pattern(pattern: str) -> str:
     if parts[0] in ("alexg2",) and len(parts) >= 5:
         return parts[4]
     # alexg5revised / alexg7 / alexg8: name|symbol|zone_kind|source_tf|pattern|ablation_tag[|g:…]
-    if parts[0] in ("alexg5revised", "alexg7", "alexg8", "alexg8optimized") and len(parts) >= 5:
+    if parts[0] in ("alexg5revised", "alexg7", "alexg8") and len(parts) >= 5:
         return parts[4]
     if parts[0] in (
         "alexg3",
@@ -242,6 +252,18 @@ class BacktestEngine:
         assert self._costs is not None
         return apply_exit_fill(mid_price, side, self._costs)
 
+    def _commission_for_trade(self, trade) -> float:
+        from borex.backtest.costs import commission_for_margin
+
+        return commission_for_margin(
+            trade.margin,
+            self.config.leverage,
+            commission_per_lot=self.config.commission_per_lot,
+            commission_per_trade=self.config.commission_per_trade,
+            lot_notional=self.config.lot_notional,
+            min_commission_per_side=self.config.min_commission_per_side,
+        )
+
     def _close_with_costs(
         self,
         portfolio: Portfolio,
@@ -255,12 +277,14 @@ class BacktestEngine:
             return
         fill = self._fill_exit(mid_price, trade.side)
         portfolio.close_position(index, fill, timestamp, reason)
-        commission = self.config.commission_per_trade
-        if commission > 0 and portfolio.closed_trades:
+        if portfolio.closed_trades:
             closed = portfolio.closed_trades[-1]
-            closed.commission = commission
-            portfolio.charge_commission(commission)
-            self._total_commission += commission
+            commission = self._commission_for_trade(closed)
+            if commission > 0:
+                closed.commission = commission
+                closed.pnl -= commission
+                portfolio.charge_commission(commission)
+                self._total_commission += commission
         n = len(portfolio.closed_trades)
         if n > 0 and n % self._progress_every == 0:
             closed = portfolio.closed_trades[-1]
@@ -290,6 +314,11 @@ class BacktestEngine:
             leverage=self.config.leverage,
             maintenance_margin_ratio=self.config.maintenance_margin_ratio,
             size_mode=self.config.size_mode,
+            commission_per_lot=self.config.commission_per_lot,
+            commission_per_trade=self.config.commission_per_trade,
+            min_commission_per_side=self.config.min_commission_per_side,
+            lot_notional=self.config.lot_notional,
+            risk_include_commission=self.config.risk_include_commission,
         )
         equity_curve: list[float] = [portfolio.equity]
         peak_equity = portfolio.equity

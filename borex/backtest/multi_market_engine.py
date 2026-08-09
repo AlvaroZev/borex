@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Mapping
 
 import sys
 
@@ -11,6 +11,7 @@ from borex.alexg.multi_market import (
     pick_master_symbol,
 )
 from borex.backtest.costs import infer_pip_size, TradeCosts, apply_entry_fill, apply_exit_fill
+from borex.backtest.decision_replay import index_decisions_by_bar
 from borex.backtest.engine import BacktestConfig, BacktestResult, mirror_sl_tp_for_inverse
 from borex.backtest.engine import _build_confirmation_stats, _msl_delay_bars, _signal_entry
 from borex.backtest.margin_stops import (
@@ -26,6 +27,21 @@ from borex.models.candle import Candle, Signal, SignalAction
 if TYPE_CHECKING:
     from borex.alexg.strategy3 import AlexG3Strategy
     from borex.alexg.strategy4 import AlexG4Strategy
+
+
+def _indices_at_master(
+    master_candles: list[Candle],
+    master_i: int,
+    ts_maps: dict[str, dict[object, int]],
+) -> dict[str, int]:
+    """Resolve per-symbol bar indices without currency-strength work."""
+    ts = master_candles[master_i].timestamp
+    indices: dict[str, int] = {}
+    for symbol, ts_map in ts_maps.items():
+        idx = ts_map.get(ts)
+        if idx is not None:
+            indices[symbol] = idx
+    return indices
 
 
 @dataclass
@@ -71,7 +87,22 @@ class MultiMarketEngine:
         candles_by_symbol: dict[str, list[Candle]],
         timeframe: str = "1h",
         master_symbol: str | None = None,
+        *,
+        same_bar_exit: bool = False,
+        decisions: list[Mapping[str, Any]] | None = None,
     ) -> MultiMarketBacktestResult:
+        """
+        Run multi-market backtest.
+
+        same_bar_exit: if True, check protective SL/TP on the same bar a new
+        fill opens (stricter / more live-like for ghost fills). Default False
+        matches the high-compounding backtest path.
+
+        decisions: optional saved analysis rows (from --save-analysis /
+        --load-analysis). When provided, strategy.on_bar is skipped and entries
+        are replayed from the cache — use for PnL-only param sweeps
+        (commission, leverage, rr-factor, same-bar, capital, …).
+        """
         if not candles_by_symbol:
             raise ValueError("No hay velas cargadas")
 
@@ -87,33 +118,59 @@ class MultiMarketEngine:
             maintenance_margin_ratio=self.config.maintenance_margin_ratio,
             size_mode=self.config.size_mode,
             max_positions=self.max_positions,
+            commission_per_lot=self.config.commission_per_lot,
+            commission_per_trade=self.config.commission_per_trade,
+            min_commission_per_side=self.config.min_commission_per_side,
+            lot_notional=self.config.lot_notional,
+            risk_include_commission=self.config.risk_include_commission,
         )
 
         equity_curve: list[float] = [portfolio.equity]
         peak = portfolio.equity
         max_dd = 0.0
         min_bars = self.strategy.min_bars
+        replay = decisions is not None
+        default_score = float(getattr(self.strategy, "min_rr", 0.0) or 0.0)
+        by_bar = (
+            index_decisions_by_bar(decisions, default_score=default_score)
+            if replay
+            else None
+        )
+        if replay:
+            print(
+                f"[alexg3] replaying {len(decisions):,} cached decisions "
+                f"({len(by_bar):,} bar keys) — strategy scan skipped",
+                flush=True,
+                file=sys.stderr,
+            )
 
         for master_i in range(min_bars, len(master_candles)):
             if portfolio.liquidated:
                 break
 
-            ctx = MultiMarketContext.at_master_bar(
-                master_i,
-                master_candles,
-                candles_by_symbol,
-                ts_maps,
-                strength_lookback=self.strategy.strength_lookback,
-                min_currency_edge=self.strategy.min_currency_edge,
-                min_confirming_pairs=self.strategy.min_confirming_pairs,
-            )
+            if replay:
+                # Cached decisions already embed currency/AOI filters — skip
+                # strength recomputation on every master bar.
+                indices = _indices_at_master(master_candles, master_i, ts_maps)
+                ctx = None
+            else:
+                ctx = MultiMarketContext.at_master_bar(
+                    master_i,
+                    master_candles,
+                    candles_by_symbol,
+                    ts_maps,
+                    strength_lookback=self.strategy.strength_lookback,
+                    min_currency_edge=self.strategy.min_currency_edge,
+                    min_confirming_pairs=self.strategy.min_confirming_pairs,
+                )
+                indices = ctx.indices
 
             prices: dict[str, float] = {}
-            for sym, idx in ctx.indices.items():
+            for sym, idx in indices.items():
                 prices[sym] = candles_by_symbol[sym][idx].close
 
             for sym in list(portfolio.open_trades.keys()):
-                idx = ctx.indices.get(sym)
+                idx = indices.get(sym)
                 if idx is None:
                     continue
                 candle = candles_by_symbol[sym][idx]
@@ -122,22 +179,44 @@ class MultiMarketEngine:
                     continue
 
             candidates: list[tuple[str, Signal, int]] = []
-            for sym in symbols:
-                idx = ctx.indices.get(sym)
-                if idx is None or idx < min_bars:
-                    continue
-                if sym in portfolio.open_trades:
-                    continue
-                self.strategy.set_context(sym, ctx)
-                signal = self.strategy.on_bar(idx, candles_by_symbol[sym], None)
-                if signal is not None:
-                    candidates.append((sym, signal, idx))
+            if replay:
+                assert by_bar is not None
+                for sym, idx in indices.items():
+                    if idx < min_bars or sym in portfolio.open_trades:
+                        continue
+                    for signal in by_bar.get((sym, idx), ()):
+                        candidates.append((sym, signal, idx))
+            else:
+                assert ctx is not None
+                for sym in symbols:
+                    idx = indices.get(sym)
+                    if idx is None or idx < min_bars:
+                        continue
+                    if sym in portfolio.open_trades:
+                        continue
+                    self.strategy.set_context(sym, ctx)
+                    signal = self.strategy.on_bar(idx, candles_by_symbol[sym], None)
+                    if signal is not None:
+                        candidates.append((sym, signal, idx))
 
             candidates.sort(key=lambda x: x[1].score, reverse=True)
+            opened: list[str] = []
             for sym, signal, idx in candidates:
                 if not portfolio.can_open(sym):
                     break
                 self._open_signal(portfolio, sym, signal, idx, candles_by_symbol[sym])
+                if same_bar_exit and sym in portfolio.open_trades:
+                    opened.append(sym)
+
+            # Optional: protective exits on the fill bar (ghost SL often tags here).
+            if same_bar_exit:
+                for sym in opened:
+                    idx = indices.get(sym)
+                    if idx is None:
+                        continue
+                    self._check_exit(
+                        portfolio, sym, idx, candles_by_symbol[sym][idx]
+                    )
 
             eq = portfolio.equity_at_prices(prices)
             equity_curve.append(eq)
@@ -238,9 +317,23 @@ class MultiMarketEngine:
         costs = self._costs(symbol)
         fill = apply_exit_fill(price, trade.side, costs)
         portfolio.close_position(symbol, index, fill, timestamp, reason)
-        if self.config.commission_per_trade > 0:
-            portfolio.charge_commission(self.config.commission_per_trade)
-            self._total_commission += self.config.commission_per_trade
+        closed = portfolio.closed_trades[-1] if portfolio.closed_trades else None
+        if closed is not None:
+            from borex.backtest.costs import commission_for_margin
+
+            commission = commission_for_margin(
+                closed.margin,
+                self.config.leverage,
+                commission_per_lot=self.config.commission_per_lot,
+                commission_per_trade=self.config.commission_per_trade,
+                lot_notional=self.config.lot_notional,
+                min_commission_per_side=self.config.min_commission_per_side,
+            )
+            if commission > 0:
+                closed.commission = commission
+                closed.pnl -= commission
+                portfolio.charge_commission(commission)
+                self._total_commission += commission
         n = len(portfolio.closed_trades)
         if n > 0 and n % self._progress_every == 0:
             closed = portfolio.closed_trades[-1]

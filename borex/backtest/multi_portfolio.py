@@ -16,6 +16,11 @@ class MultiMarketPortfolio:
     maintenance_margin_ratio: float = 0.0
     size_mode: str = "margin"
     max_positions: int = 5
+    commission_per_lot: float = 0.0
+    commission_per_trade: float = 0.0
+    min_commission_per_side: float = 0.04
+    lot_notional: float = 100_000.0
+    risk_include_commission: bool = True
     cash: float = field(init=False)
     open_trades: dict[str, Trade] = field(default_factory=dict)
     closed_trades: list[Trade] = field(default_factory=list)
@@ -69,7 +74,22 @@ class MultiMarketPortfolio:
         mode = size_mode or self.size_mode
         uninvested = self.cash
         if mode == "margin":
-            return uninvested * self.position_size_pct
+            risk_budget = uninvested * self.position_size_pct
+            if (
+                self.risk_include_commission
+                and self.commission_per_lot > 0
+                and self.leverage > 0
+            ):
+                from borex.backtest.costs import margin_for_risk_net_commission
+
+                return margin_for_risk_net_commission(
+                    risk_budget,
+                    self.leverage,
+                    commission_per_lot=self.commission_per_lot,
+                    lot_notional=self.lot_notional,
+                    min_commission_per_side=self.min_commission_per_side,
+                )
+            return risk_budget
         cap = min(self.equity * self.position_size_pct, uninvested)
         if risk_per_trade_pct is None:
             return cap

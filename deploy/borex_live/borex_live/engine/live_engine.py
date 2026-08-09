@@ -8,8 +8,8 @@ from borex.alexg.multi_market import (
     align_symbols_to_timeline,
     pick_master_symbol,
 )
-from borex.backtest.engine import BacktestConfig, _signal_entry
-from borex.backtest.margin_stops import margin_stop_out_prices, rr_from_winrate
+from borex.backtest.engine import BacktestConfig, _is_late_sl_entry, _signal_entry
+from borex.backtest.margin_stops import margin_stop_out_prices, resolve_rr
 from borex.backtest.multi_market_engine import MultiMarketEngine
 from borex.backtest.portfolio import PositionSide
 from borex.models.candle import Candle, Signal, SignalAction
@@ -53,6 +53,7 @@ class LiveEngine:
             size_mode="margin",
             true_sl=True,
             true_sl_rr=cfg.min_rr,
+            rr_mode="dynamic",
             rr_factor=cfg.rr_factor,
             stop_loss_pct=None,
             take_profit_pct=None,
@@ -74,12 +75,37 @@ class LiveEngine:
         side: PositionSide,
     ) -> tuple[float, float, float]:
         wr = self.repo.win_rate()
-        rr = rr_from_winrate(wr, self.bt_config.true_sl_rr) * self.bt_config.rr_factor
+        rr = resolve_rr(
+            rr_mode=self.bt_config.rr_mode,
+            fixed_rr=self.bt_config.true_sl_rr,
+            winrate=wr,
+            rr_factor=self.bt_config.rr_factor,
+        )
         sl, tp = margin_stop_out_prices(exec_price, side, self.bt_config.leverage, rr)
         return sl, tp, rr
 
+    def _live_quote(self, symbol: str, side: PositionSide) -> float | None:
+        """Broker ask (buy) / bid (sell) for true-SL levels on market entry."""
+        mt5 = getattr(self.router, "mt5", None)
+        if mt5 is None or getattr(mt5, "dry_run", True) or not getattr(mt5, "connected", False):
+            return None
+        try:
+            return mt5.quote_price(symbol, "buy" if side == PositionSide.LONG else "sell")
+        except Exception:
+            return None
+
     def _margin_for_entry(self) -> float:
-        return self._cash() * self.cfg.position_size_pct
+        """Risk money per trade = equity × position_size_pct (backtest margin mode)."""
+        eq = 0.0
+        mt5 = getattr(getattr(self, "router", None), "mt5", None)
+        if mt5 is not None and getattr(mt5, "connected", False) and not getattr(mt5, "dry_run", True):
+            try:
+                eq = float(mt5.account_equity() or 0.0)
+            except Exception:
+                eq = 0.0
+        if eq <= 0:
+            eq = self._cash()
+        return eq * self.cfg.position_size_pct
 
     def step_master_bar(
         self,
@@ -108,6 +134,13 @@ class LiveEngine:
                 continue
             candle = candles_by_symbol[sym][idx]
             trade = open_db[sym]
+            # same_bar_exit=False: do not evaluate SL/TP on the entry bar
+            # (entry is booked after that H1 bar has already closed).
+            if (
+                not self.cfg.same_bar_exit
+                and _same_bar_timestamp(trade.entry_time, candle.timestamp)
+            ):
+                continue
             if self._mm._check_exit_live(sym, candle, trade, self.repo):
                 exits.append((sym, "closed", candle.close))
 
@@ -122,6 +155,7 @@ class LiveEngine:
             self.strategy.set_context(sym, ctx)
             signal = self.strategy.on_bar(idx, candles_by_symbol[sym], None)
             after = read_pending_snapshot(self.strategy)
+            # DB-only ghost queue / cancel — never places MT5 limits
             self.router.sync_ghost_pending_orders(before, after)
 
             if signal is None:
@@ -158,7 +192,16 @@ class LiveEngine:
             if signal.action == SignalAction.BUY
             else PositionSide.SHORT
         )
+        # Ghost signals carry the trigger SL in signal.price. H1-close live enters
+        # at the broker quote, so true-SL / TP must be anchored to that quote —
+        # never to the ghost SL (that put TP on the wrong side of entry).
         exec_price = mid_price
+        if self.entry_mode == EntryMode.GHOST and _is_late_sl_entry(signal):
+            quote = self._live_quote(symbol, side)
+            if quote is not None and quote > 0:
+                exec_price = quote
+            elif candles:
+                exec_price = float(candles[index].close)
         sl, tp, rr = self._compute_sltp(signal, exec_price, side)
         margin = self._margin_for_entry()
         expected_loss = margin
@@ -166,7 +209,14 @@ class LiveEngine:
 
         if self.entry_mode == EntryMode.IMMEDIATE:
             before = {t.symbol for t in self.repo.open_trades()}
-            ticket = self.router.handle_immediate_signal(symbol, signal, sl, tp)
+            ticket = self.router.handle_immediate_signal(
+                symbol,
+                signal,
+                sl,
+                tp,
+                margin=margin,
+                rr_used=rr,
+            )
             self.router.handle_entry_fill(
                 symbol,
                 signal,
@@ -183,16 +233,14 @@ class LiveEngine:
                 self.repo.set_cash(self._cash() - margin)
             return
 
-        # GHOST: broker pending should already be working at strategy SL.
-        # Prefer strategy structural stops from the late-entry signal.
+        # GHOST fill on closed H1: market enter with true_sl protective stops
+        # (matches backtest true_sl + same_bar_exit=False entry timing).
         before = {t.symbol for t in self.repo.open_trades()}
-        ghost_sl = float(signal.stop_loss) if signal.stop_loss is not None else sl
-        ghost_tp = float(signal.take_profit) if signal.take_profit is not None else tp
         self.router.handle_entry_fill(
             symbol,
             signal,
-            ghost_sl,
-            ghost_tp,
+            sl,
+            tp,
             margin=margin,
             rr_used=rr,
             expected_win=expected_win,
@@ -201,6 +249,26 @@ class LiveEngine:
         after = {t.symbol for t in self.repo.open_trades()}
         if symbol not in before and symbol in after:
             self.repo.set_cash(self._cash() - margin)
+
+
+def _same_bar_timestamp(entry_time: object, candle_ts: object) -> bool:
+    """True when trade.entry_time refers to this candle's open timestamp."""
+    try:
+        import pandas as pd
+
+        a = pd.Timestamp(entry_time)
+        b = pd.Timestamp(candle_ts)
+        if a.tzinfo is None:
+            a = a.tz_localize("UTC")
+        else:
+            a = a.tz_convert("UTC")
+        if b.tzinfo is None:
+            b = b.tz_localize("UTC")
+        else:
+            b = b.tz_convert("UTC")
+        return a == b
+    except Exception:
+        return str(entry_time) == str(candle_ts)
 
 
 # Monkey-patch helper for live exit checks against DB trades
