@@ -54,6 +54,8 @@ class LiveService:
         self._runtime: dict[str, Any] = {"status": "init"}
         self._strategy: Any = None
         self._last_session_status_hour: str | None = None
+        self._last_backup_at: float = 0.0
+        self._backup_lock = threading.Lock()
 
     @property
     def runtime(self) -> dict[str, Any]:
@@ -193,13 +195,16 @@ class LiveService:
         )
         logger.info(
             "Live service started | %s | entry_mode=%s | ghost=H1-close-market | "
-            "same_bar_exit=%s | master=%s",
+            "same_bar_exit=%s | master=%s | db_backup=%s",
             self.cfg.strategy,
             spec.entry_mode.value,
             "on" if self.cfg.same_bar_exit else "off",
             self.master_symbol,
+            "on" if self.cfg.database_backup_url else "off",
         )
         self._log_trading_session_status(reason="startup")
+        if self.cfg.database_backup_url and self.cfg.backup_interval_seconds > 0:
+            self._maybe_backup_to_railway(force=True)
 
     def _strategy_session_filter(self) -> str:
         """Ablation session pill (alexg5revised+); default all if absent."""
@@ -853,6 +858,28 @@ class LiveService:
             "closed_trades": dash.get("closed_trades") or [],
         }
 
+    def _maybe_backup_to_railway(self, *, force: bool = False) -> None:
+        """Push local primary DB → Railway backup. Never raises into the trade loop."""
+        backup_url = (self.cfg.database_backup_url or "").strip()
+        interval = int(self.cfg.backup_interval_seconds or 0)
+        if not backup_url or interval <= 0:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_backup_at) < interval:
+            return
+        if not self._backup_lock.acquire(blocking=False):
+            return
+        try:
+            from borex_live.store.backup_sync import sync_local_to_backup
+
+            counts = sync_local_to_backup(self.cfg.database_url, backup_url)
+            self._last_backup_at = time.monotonic()
+            logger.info("DB backup sync local→Railway ok | %s", counts)
+        except Exception:
+            logger.exception("DB backup sync failed (trading continues on local DB)")
+        finally:
+            self._backup_lock.release()
+
     def run_loop(self, poll_seconds: int = 30) -> None:
         self.start()
         try:
@@ -863,6 +890,7 @@ class LiveService:
                     if hour_key != self._last_session_status_hour:
                         self._log_trading_session_status(reason="hourly")
                     self.process_once()
+                    self._maybe_backup_to_railway()
                 except Exception as exc:
                     logger.exception("live loop error")
                     # Only recycle DB pool on connection/timeout style failures

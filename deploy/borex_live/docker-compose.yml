@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: borex_live_pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: borex
+      POSTGRES_PASSWORD: borex
+      POSTGRES_DB: borex_live
+    ports:
+      - "5433:5432"
+    volumes:
+      - borex_live_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U borex -d borex_live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  borex_live_pgdata:

@@ -1,0 +1,71 @@
+{
+  "generated_at": "2026-08-09T17:37:38.967639+00:00",
+  "note": "What-if: alexg7aligned as if live ran this week (MT5 OHLC, borex engine)",
+  "params": {
+    "strategy": "alexg7aligned",
+    "min_rr": 3.0,
+    "rr_factor": 1.88,
+    "capital": 1000.0,
+    "leverage": 5000,
+    "position_size": 0.01,
+    "same_bar_exit": false,
+    "commission_per_lot": 7.0,
+    "risk_include_commission": true,
+    "session": "overlap",
+    "max_positions": 60
+  },
+  "eval_start": "2026-08-03T00:00:00+00:00",
+  "eval_end": "2026-08-09T00:00:00+00:00",
+  "pairs": 60,
+  "summary": {
+    "trades": 3,
+    "wins": 1,
+    "losses": 2,
+    "win_rate": 0.3333333333333333,
+    "pnl_sum": 18.51925925925886,
+    "return_pct": 0.01851925925925886,
+    "avg_win": 38.7999999999996,
+    "avg_loss": -10.14037037037037
+  },
+  "trades": [
+    {
+      "symbol": "AUDCAD=X",
+      "side": "long",
+      "entry_time": "2026-08-03T13:00:00+00:00",
+      "exit_time": "2026-08-03T14:00:00+00:00",
+      "entry": 0.98385,
+      "sl": 0.98365323,
+      "tp": 0.9849597827999997,
+      "pnl": -10.0,
+      "margin": 7.4,
+      "exit_reason": "margin_stop",
+      "pattern": "alexg7aligned|AUDCAD=X|support|daily|close_in_aoi|bias=off|trend0|pat0|ret0|ghost1|sess=overlap|g:132:0.98400000:0.98385000:0.98475000"
+    },
+    {
+      "symbol": "AUDCHF=X",
+      "side": "long",
+      "entry_time": "2026-08-06T00:00:00+00:00",
+      "exit_time": "2026-08-06T01:00:00+00:00",
+      "entry": 0.56634,
+      "sl": 0.566226732,
+      "tp": 0.56697883152,
+      "pnl": 38.7999999999996,
+      "margin": 7.333333333333333,
+      "exit_reason": "take_profit",
+      "pattern": "alexg7aligned|AUDCHF=X|support|daily|close_in_aoi|bias=off|trend0|pat0|ret0|ghost1|sess=overlap|g:180:0.57000000:0.56634000:0.58830000"
+    },
+    {
+      "symbol": "EURJPY=X",
+      "side": "long",
+      "entry_time": "2026-08-07T15:00:00+00:00",
+      "exit_time": "2026-08-07T16:00:00+00:00",
+      "entry": 182.295,
+      "sl": 182.25854099999998,
+      "tp": 182.43208584,
+      "pnl": -10.280740740740738,
+      "margin": 7.620740740740738,
+      "exit_reason": "margin_stop",
+      "pattern": "alexg7aligned|EURJPY=X|support|daily|close_in_aoi|bias=off|trend0|pat0|ret0|ghost1|sess=overlap|g:228:182.55000000:182.29500000:183.82500000"
+    }
+  ]
+}

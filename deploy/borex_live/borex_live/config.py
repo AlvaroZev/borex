@@ -29,6 +29,9 @@ class LiveServiceConfig:
     host: str = "127.0.0.1"
     warmup_bars: int = 300
     database_url: str = ""
+    # Optional Railway (or other) mirror; live never depends on this for trading.
+    database_backup_url: str = ""
+    backup_interval_seconds: int = 300
     mt5_path: str = ""
     mt5_login: int = 0
     mt5_password: str = ""
@@ -41,7 +44,11 @@ class LiveServiceConfig:
     @classmethod
     def from_env(cls) -> LiveServiceConfig:
         db = os.environ.get("DATABASE_URL", "")
-        return cls(database_url=db)
+        backup = (
+            os.environ.get("DATABASE_BACKUP_URL", "")
+            or os.environ.get("RAILWAY_DATABASE_URL", "")
+        )
+        return cls(database_url=db, database_backup_url=backup)
 
     def mt5_credentials(self) -> tuple[int, str, str]:
         login = self.mt5_login or int(os.environ.get("MT5_LOGIN", "0") or 0)

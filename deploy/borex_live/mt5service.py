@@ -69,7 +69,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--port", type=int, default=8790)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--poll", type=int, default=30, help="Seconds between bar checks")
-    p.add_argument("--db", default="", help="Postgres URL (or DATABASE_URL env)")
+    p.add_argument("--db", default="", help="Primary Postgres URL (or DATABASE_URL env)")
+    p.add_argument(
+        "--db-backup",
+        default="",
+        help="Optional Railway/backup URL (or DATABASE_BACKUP_URL env)",
+    )
+    p.add_argument(
+        "--backup-interval",
+        type=int,
+        default=300,
+        help="Seconds between local→backup sync (0=disable; default 300)",
+    )
     p.add_argument("--mt5-path", default="", help="Path to terminal64.exe")
     p.add_argument(
         "--same-bar-exit",
@@ -86,6 +97,11 @@ def parse_args() -> argparse.Namespace:
 
 def build_config(args: argparse.Namespace) -> LiveServiceConfig:
     db = args.db or os.environ.get("DATABASE_URL", "")
+    backup = (
+        args.db_backup
+        or os.environ.get("DATABASE_BACKUP_URL", "")
+        or os.environ.get("RAILWAY_DATABASE_URL", "")
+    )
     symbols = [
         s.strip() for s in (args.symbols or "").split(",") if s.strip()
     ]
@@ -112,6 +128,8 @@ def build_config(args: argparse.Namespace) -> LiveServiceConfig:
         host=args.host,
         warmup_bars=args.warmup_bars,
         database_url=db,
+        database_backup_url=backup,
+        backup_interval_seconds=int(args.backup_interval),
         mt5_path=args.mt5_path or os.environ.get("MT5_PATH", ""),
         symbols=symbols,
         borex_main_root=args.borex_main
