@@ -45,7 +45,14 @@ class BacktestConfig:
     true_sl_rr: float = 3.0
     rr_mode: str = "fixed"  # fixed | dynamic (1/winrate)
     rr_factor: float = 1.0  # TP multiplier on resolved RR (fixed or dynamic)
+    # Clamp resolved RR after rr_factor (0 = no clamp).
+    rr_min: float = 0.0
+    rr_max: float = 0.0
+    # Ignore sample WR for dynamic RR until this many closed trades (live parity).
+    winrate_min_trades: int = 20
     spread_pips: float = 0.0
+    # Per-pair override (IC Markets Raw). Falls back to spread_pips.
+    spread_pips_by_symbol: dict[str, float] = field(default_factory=dict)
     slippage_pips: float = 0.0
     commission_per_trade: float = 0.0
     # Round-turn USD per 1.0 standard lot (notional = lot_notional).
@@ -55,7 +62,18 @@ class BacktestConfig:
     lot_notional: float = 100_000.0
     # Shrink margin so price-SL loss + commission ≈ position_size_pct risk.
     risk_include_commission: bool = True
+    # Charge round-turn commission at entry (margin stays at full position_size_pct).
+    commission_at_entry: bool = False
+    # Daily: flatten each trade at its originating session's last H1 hour.
+    # Friday: flatten leftovers on the last New York hour (weekend).
+    force_flat_friday: bool = False
+    force_flat_daily: bool = False
+    force_flat_utc_hour: int = 19  # unused (legacy global clock)
+    force_flat_friday_from_hour: int = 19  # 19 = NY last hour; other = explicit
     pip_size: float | None = None  # auto desde símbolo si None
+    # True: SL/margin-stop on H1 high/low (broker-like). False: TP still
+    # uses the wick; SL only if the bar close is through the stop.
+    intra_hour_sl: bool = True
 
 
 @dataclass
@@ -445,6 +463,10 @@ class BacktestEngine:
                 fixed_rr=self.config.true_sl_rr,
                 winrate=portfolio.win_rate,
                 rr_factor=self.config.rr_factor,
+                closed_trades=len(portfolio.closed_trades),
+                winrate_min_trades=self.config.winrate_min_trades,
+                rr_min=self.config.rr_min,
+                rr_max=self.config.rr_max,
             )
 
             # Inverse flips fill side first. Mirror analysis SL/TP onto that

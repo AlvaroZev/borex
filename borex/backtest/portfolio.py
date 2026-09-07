@@ -34,6 +34,8 @@ class Trade:
     exit_reason: str = ""
     # If set, ignore SL / margin-stop until bar index >= this value (TP still active).
     sl_armed_from_index: int | None = None
+    # Origin FX session at fill (asia|london|newyork|overlap). Empty = classify later.
+    entry_session: str = ""
 
     @property
     def is_open(self) -> bool:

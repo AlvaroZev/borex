@@ -10,6 +10,7 @@ dist/
 build/
 .pytest_cache/
 data/cache/
+data/runs/
 data/*.csv
 data/*.db
 data/*.log

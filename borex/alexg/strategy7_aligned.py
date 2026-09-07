@@ -34,3 +34,5 @@ class AlexG7AlignedStrategy(AlexG5RevisedStrategy):
     sl_touch_pad_pips: float = 30.0
     signal_cooldown: int = 6
     ghost_sl_mult: float = 0.6
+    # Live is H1-close market, not a resting limit at ghost SL.
+    ghost_fill_at_close: bool = True

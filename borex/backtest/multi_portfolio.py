@@ -101,12 +101,20 @@ class MultiMarketPortfolio:
         risk_margin = self.equity * risk_per_trade_pct / (self.leverage * sl_dist_pct)
         return min(risk_margin, cap)
 
+    def book_is_full(self) -> bool:
+        """True when no additional symbol can be opened (cash / cap / dead)."""
+        if self.liquidated or not self.cash:
+            return True
+        if self.max_positions > 0 and len(self.open_trades) >= self.max_positions:
+            return True
+        return self.compute_margin(1.0) <= 0
+
     def can_open(self, symbol: str = "") -> bool:
         if self.liquidated or not self.cash:
             return False
         if symbol and symbol in self.open_trades:
             return False
-        if len(self.open_trades) >= self.max_positions:
+        if self.max_positions > 0 and len(self.open_trades) >= self.max_positions:
             return False
         return self.compute_margin(1.0) > 0
 
@@ -150,6 +158,9 @@ class MultiMarketPortfolio:
 
         side = PositionSide.LONG if action == SignalAction.BUY else PositionSide.SHORT
         self.cash -= margin
+        from borex.alexg.sessions import classify_session
+
+        sess = classify_session(timestamp)
         self.open_trades[symbol] = Trade(
             side=side,
             entry_index=index,
@@ -164,6 +175,7 @@ class MultiMarketPortfolio:
             entry_cash=entry_cash,
             entry_equity=entry_equity,
             sl_armed_from_index=sl_armed_from_index,
+            entry_session=sess.value if sess is not None else "",
         )
         return True
 

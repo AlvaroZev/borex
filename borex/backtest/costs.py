@@ -36,6 +36,115 @@ def infer_pip_size(symbol: str) -> float:
     return 0.0001
 
 
+# IC Markets Raw session averages (pips). Weekend last-quote is often much wider.
+_ICMARKETS_RAW_SPREAD_PIPS: dict[str, float] = {
+    "EURUSD": 0.10,
+    "GBPUSD": 0.20,
+    "USDJPY": 0.10,
+    "AUDUSD": 0.20,
+    "USDCAD": 0.30,
+    "USDCHF": 0.20,
+    "NZDUSD": 0.30,
+    "EURGBP": 0.20,
+    "EURJPY": 0.30,
+    "GBPJPY": 0.60,
+    "EURCHF": 0.25,
+    "AUDJPY": 0.40,
+    "EURAUD": 0.40,
+    "EURCAD": 0.40,
+    "EURNZD": 0.50,
+    "GBPAUD": 0.60,
+    "GBPCAD": 0.60,
+    "GBPCHF": 0.50,
+    "AUDCAD": 0.40,
+    "AUDCHF": 0.40,
+    "AUDNZD": 0.50,
+    "CADJPY": 0.40,
+    "CADCHF": 0.40,
+    "NZDJPY": 0.50,
+    "NZDCAD": 0.50,
+    "NZDCHF": 0.50,
+    "CHFJPY": 0.40,
+    "USDSGD": 0.80,
+    "EURSGD": 1.00,
+    "GBPSGD": 1.20,
+    "AUDSGD": 1.00,
+    "SGDJPY": 1.20,
+    "USDSEK": 2.50,
+    "USDNOK": 2.50,
+    "USDDKK": 1.50,
+    "EURSEK": 2.50,
+    "EURNOK": 2.50,
+    "EURDKK": 1.20,
+    "GBPSEK": 3.00,
+    "GBPNOK": 3.00,
+    "GBPDKK": 2.00,
+    "NOKSEK": 2.00,
+    "NOKJPY": 2.00,
+    "SEKJPY": 2.00,
+    "USDCNH": 1.50,
+    "USDHKD": 1.50,
+    "USDPLN": 2.50,
+    "EURPLN": 2.50,
+    "EURHKD": 2.00,
+    "USDCZK": 3.00,
+    "USDHUF": 4.00,
+    "USDTHB": 4.00,
+    "USDMXN": 6.00,
+    "USDTRY": 12.00,
+    "USDZAR": 10.00,
+    "EURTRY": 14.00,
+    "EURZAR": 12.00,
+    "GBPTRY": 16.00,
+}
+
+
+def typical_icmarkets_raw_spread_pips(symbol: str) -> float:
+    """Session-typical Raw spread in pips when the live quote is unusable."""
+    key = symbol.upper().replace("=X", "").replace("/", "")
+    if key in _ICMARKETS_RAW_SPREAD_PIPS:
+        return _ICMARKETS_RAW_SPREAD_PIPS[key]
+    exotic = {"TRY", "ZAR", "MXN", "HUF", "CZK", "THB", "CNH"}
+    scandi = {"SEK", "NOK", "DKK"}
+    base, quote = key[:3], key[3:6]
+    if base in exotic or quote in exotic:
+        return 8.0
+    if base in scandi or quote in scandi:
+        return 2.5
+    if "SGD" in key or "HKD" in key or "PLN" in key:
+        return 1.5
+    return 0.80
+
+
+def clamp_spread_pips(quoted: float, typical: float) -> float:
+    """Keep a live quote if it looks like session; else the typical Raw value."""
+    q = float(quoted or 0.0)
+    typ = max(0.10, float(typical or 0.0))
+    if q < 0.05:
+        return typ
+    # Weekend / rollover quotes can be 10–50× session.
+    if q > max(3.0 * typ, typ + 4.0):
+        return typ
+    return q
+
+
+def spread_pips_from_quote(
+    *,
+    bid: float,
+    ask: float,
+    symbol: str,
+    points: int = 0,
+    point_size: float = 0.0,
+) -> float:
+    """Bid/ask or MT5 point-spread → pips."""
+    pip = infer_pip_size(symbol)
+    if ask > 0 and bid > 0 and ask >= bid:
+        return (float(ask) - float(bid)) / pip
+    if points > 0 and point_size > 0 and pip > 0:
+        return float(points) * float(point_size) / pip
+    return 0.0
+
+
 def apply_entry_fill(
     mid_price: float,
     side: PositionSide,

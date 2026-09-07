@@ -57,6 +57,9 @@ class GhostSLEntryMixin:
     ghost_sl_mult: float = 1.0
     # Extra pips beyond SL that still count as a fill touch (feed noise).
     sl_touch_pad_pips: float = 0.0
+    # True for alexg7aligned/alexg8 live: H1-close market, not limit-at-SL.
+    # Engine then fills at the tagging bar close (|fill:close|).
+    ghost_fill_at_close: bool = False
 
     _pending: dict[str, PendingSetup] = field(default_factory=dict, repr=False)
 
@@ -165,14 +168,17 @@ class GhostSLEntryMixin:
         index: int,
         candles: list[Candle],
     ) -> Signal:
-        fill_price = pending.stop_loss
+        candle = candles[index]
+        fill_at_close = bool(getattr(self, "ghost_fill_at_close", False))
+        fill_price = float(candle.close) if fill_at_close else pending.stop_loss
         stop_loss, take_profit = self._stops_from_late_entry(pending, fill_price)
+        extra = "|fill:close" if fill_at_close else ""
         return Signal(
             action=pending.action,
-            pattern=f"{pending.pattern}|{self._ghost_tag(pending)}",
+            pattern=f"{pending.pattern}|{self._ghost_tag(pending)}{extra}",
             index=index,
             price=fill_price,
-            timestamp=candles[index].timestamp,
+            timestamp=candle.timestamp,
             stop_loss=stop_loss,
             take_profit=take_profit,
             score=self.min_rr,

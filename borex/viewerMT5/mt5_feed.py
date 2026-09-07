@@ -85,13 +85,21 @@ def period_to_range(
 
 def _cache_path(symbol: str, interval: str) -> Path:
     safe = symbol.replace("=", "").replace("/", "_")
-    return MT5_CACHE_ROOT / safe / f"{interval}.parquet"
+    # utc_v2: whole-hour H1 labels, closed bars only. v1 `utc/` mixed :45
+    # snaps and weekend −14h clock probes.
+    return MT5_CACHE_ROOT / "utc_v2" / safe / f"{interval}.parquet"
 
 
-def _rates_to_candles(rates) -> list[Candle]:
+def _rates_to_candles(
+    rates, *, offset_seconds: int = 0, snap_hourly: bool = False
+) -> list[Candle]:
+    from borex.data.mt5_time import mt5_unix_to_utc, snap_h1_open
+
     candles: list[Candle] = []
     for row in rates:
-        ts = datetime.fromtimestamp(int(row["time"]), tz=timezone.utc)
+        ts = mt5_unix_to_utc(int(row["time"]), offset_seconds)
+        if snap_hourly:
+            ts = snap_h1_open(ts)
         candles.append(
             Candle(
                 timestamp=ts,
@@ -102,7 +110,69 @@ def _rates_to_candles(rates) -> list[Candle]:
                 volume=float(row["tick_volume"]),
             )
         )
+    if snap_hourly:
+        candles = _dedupe_hourly(candles)
     return candles
+
+
+def _dedupe_hourly(candles: list[Candle]) -> list[Candle]:
+    """Keep one H1 bar per UTC hour (later copy wins)."""
+    from borex.data.mt5_time import snap_h1_open
+
+    by_hour: dict = {}
+    for c in candles:
+        ts = snap_h1_open(c.timestamp)
+        by_hour[ts] = Candle(
+            timestamp=ts,
+            open=c.open,
+            high=c.high,
+            low=c.low,
+            close=c.close,
+            volume=c.volume,
+        )
+    return [by_hour[k] for k in sorted(by_hour.keys())]
+
+
+def _drop_forming_bar(candles: list[Candle], interval: str) -> list[Candle]:
+    """Drop the incomplete last bar — live only trades closed H1."""
+    if not candles:
+        return candles
+    last = candles[-1]
+    ts = pd.Timestamp(last.timestamp)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    sec = _TF_SECONDS.get(interval.strip().lower(), 3600)
+    close_ts = ts + pd.Timedelta(seconds=sec)
+    if close_ts > pd.Timestamp.now(tz="UTC"):
+        return candles[:-1]
+    return candles
+
+
+def _cache_is_fresh(
+    sliced: list[Candle], end: datetime, interval: str
+) -> bool:
+    if not sliced:
+        return False
+    last = pd.Timestamp(sliced[-1].timestamp)
+    if last.tzinfo is None:
+        last = last.tz_localize("UTC")
+    else:
+        last = last.tz_convert("UTC")
+    end_ts = pd.Timestamp(end)
+    if end_ts.tzinfo is None:
+        end_ts = end_ts.tz_localize("UTC")
+    else:
+        end_ts = end_ts.tz_convert("UTC")
+    lag = (end_ts - last).total_seconds()
+    hourly = interval.strip().lower() in {"1h", "h1"}
+    max_lag = 3 * 3600 if hourly else 24 * 3600
+    if lag > max_lag:
+        return False
+    if hourly and (last.minute != 0 or last.second != 0):
+        return False
+    return True
 
 
 def _candles_to_frame(candles: list[Candle]) -> pd.DataFrame:
@@ -175,6 +245,32 @@ def connect_mt5_client():
     return client
 
 
+def read_spread_pips(client, yahoo_symbol: str) -> float:
+    """Broker bid/ask in pips, clamped to IC Markets Raw session if the quote is dead."""
+    from borex.backtest.costs import (
+        clamp_spread_pips,
+        spread_pips_from_quote,
+        typical_icmarkets_raw_spread_pips,
+    )
+
+    typical = typical_icmarkets_raw_spread_pips(yahoo_symbol)
+    try:
+        mt5_sym = client.ensure_symbol(yahoo_symbol)
+        mt5 = client._mt5
+        tick = mt5.symbol_info_tick(mt5_sym) if mt5 is not None else None
+        info = mt5.symbol_info(mt5_sym) if mt5 is not None else None
+        quoted = spread_pips_from_quote(
+            bid=float(getattr(tick, "bid", 0.0) or 0.0),
+            ask=float(getattr(tick, "ask", 0.0) or 0.0),
+            symbol=yahoo_symbol,
+            points=int(getattr(info, "spread", 0) or 0),
+            point_size=float(getattr(info, "point", 0.0) or 0.0),
+        )
+    except Exception:
+        quoted = 0.0
+    return clamp_spread_pips(quoted, typical)
+
+
 def list_tradeable_yahoo_symbols(client=None) -> list[str]:
     """All broker Forex pairs that are tradeable in Market Watch."""
     own = client is None
@@ -197,11 +293,19 @@ def _copy_rates_chunked(client, mt5_sym: str, interval: str, start: datetime, en
     """Fetch OHLC; if a long range fails/short, chunk or use from_pos."""
     import numpy as np
 
+    from borex.data.mt5_time import utc_to_mt5_request
+
     mt5 = client._mt5
     tf = client._tf(interval)
+    offset = int(getattr(client, "server_offset_seconds", 0) or 0)
 
     def one(a: datetime, b: datetime):
-        return mt5.copy_rates_range(mt5_sym, tf, a, b)
+        return mt5.copy_rates_range(
+            mt5_sym,
+            tf,
+            utc_to_mt5_request(a, offset),
+            utc_to_mt5_request(b, offset),
+        )
 
     rates = one(start, end)
     expected = _expected_bars(interval, start, end)
@@ -257,13 +361,20 @@ def fetch_mt5_candles(
     cache_ok_bars = max(200, int(0.55 * expected))
 
     cache_file = _cache_path(symbol, interval)
+    hourly = interval.strip().lower() in {"1h", "h1"}
     if use_cache and cache_file.is_file():
         try:
             df = pd.read_parquet(cache_file)
             cached = _frame_to_candles(df)
+            if hourly:
+                cached = _dedupe_hourly(cached)
             sliced = _slice_candles(cached, start, end)
-            if sliced and len(sliced) >= cache_ok_bars:
-                return sliced
+            if (
+                sliced
+                and len(sliced) >= cache_ok_bars
+                and _cache_is_fresh(sliced, end, interval)
+            ):
+                return _drop_forming_bar(sliced, interval)
         except Exception:
             pass
 
@@ -276,29 +387,33 @@ def fetch_mt5_candles(
         if rates is None or len(rates) == 0:
             err = client._mt5.last_error() if client._mt5 is not None else None
             raise RuntimeError(f"MT5 copy_rates failed for {mt5_sym} {interval}: {err}")
-        candles = _rates_to_candles(rates)
+        offset = int(getattr(client, "server_offset_seconds", 0) or 0)
+        candles = _rates_to_candles(
+            rates, offset_seconds=offset, snap_hourly=hourly
+        )
         candles = _slice_candles(candles, start, end)
+        candles = _drop_forming_bar(candles, interval)
         if write_cache and candles:
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             # Merge with any existing cache so a deeper fetch grows the file
             if cache_file.is_file():
                 try:
                     prev = _frame_to_candles(pd.read_parquet(cache_file))
-                    merged = {pd.Timestamp(c.timestamp).value: c for c in prev}
-                    for c in candles:
-                        merged[pd.Timestamp(c.timestamp).value] = c
-                    candles_to_store = [
-                        merged[k] for k in sorted(merged.keys())
-                    ]
-                    _candles_to_frame(candles_to_store).to_parquet(
-                        cache_file, index=False
-                    )
-                    candles = _slice_candles(candles_to_store, start, end)
+                    if hourly:
+                        prev = _dedupe_hourly(prev)
+                        candles = _dedupe_hourly(prev + candles)
+                    else:
+                        merged = {pd.Timestamp(c.timestamp).value: c for c in prev}
+                        for c in candles:
+                            merged[pd.Timestamp(c.timestamp).value] = c
+                        candles = [merged[k] for k in sorted(merged.keys())]
+                    _candles_to_frame(candles).to_parquet(cache_file, index=False)
+                    candles = _slice_candles(candles, start, end)
                 except Exception:
                     _candles_to_frame(candles).to_parquet(cache_file, index=False)
             else:
                 _candles_to_frame(candles).to_parquet(cache_file, index=False)
-        return candles
+        return _drop_forming_bar(candles, interval)
     finally:
         if own:
             client.disconnect()
