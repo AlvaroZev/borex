@@ -15,6 +15,8 @@ from borex_live.store.models import (
     PortfolioState,
     ServiceEvent,
     ServiceRun,
+    TheoryState,
+    TheoryTrade,
 )
 
 
@@ -170,6 +172,16 @@ class StateRepository:
         row.status = reason
         self.log_event("ghost_invalidated", f"{symbol}: {reason}", {"symbol": symbol})
 
+    def invalidate_all_waiting_ghosts(self, reason: str = "restart_replay") -> int:
+        rows = self.list_pending_ghosts()
+        n = 0
+        for row in rows:
+            row.status = reason
+            n += 1
+        if n:
+            self.log_event("ghost_invalidated", f"cleared {n} waiting ghost(s): {reason}")
+        return n
+
     def open_live_trade(
         self,
         *,
@@ -292,6 +304,145 @@ class StateRepository:
             return rows[-limit:]
         return rows
 
+    def get_theory_state(self) -> TheoryState | None:
+        return self.session.get(TheoryState, 1)
+
+    def reset_theory(self) -> None:
+        """Start a clean theory epoch without touching real/live state."""
+        self.session.query(TheoryTrade).delete()
+        row = self.session.get(TheoryState, 1)
+        if row is not None:
+            self.session.delete(row)
+        self.session.flush()
+
+    def save_theory_state(
+        self,
+        *,
+        strategy: str,
+        config_hash: str,
+        initial_capital: float,
+        cash: float,
+        equity: float,
+        last_master_ts: str,
+        state_blob: bytes,
+    ) -> TheoryState:
+        row = self.session.get(TheoryState, 1)
+        if row is None:
+            row = TheoryState(
+                id=1,
+                strategy=strategy,
+                config_hash=config_hash,
+                initial_capital=initial_capital,
+                cash=cash,
+                equity=equity,
+                last_master_ts=last_master_ts,
+                state_blob=state_blob,
+            )
+            self.session.add(row)
+        else:
+            row.strategy = strategy
+            row.config_hash = config_hash
+            row.initial_capital = initial_capital
+            row.cash = cash
+            row.equity = equity
+            row.last_master_ts = last_master_ts
+            row.state_blob = state_blob
+            row.updated_at = datetime.now(timezone.utc)
+        self.session.flush()
+        return row
+
+    def upsert_theory_trade(self, trade: Any) -> TheoryTrade:
+        entry_time = str(trade.entry_time)
+        pattern = str(trade.pattern or "")
+        row = (
+            self.session.query(TheoryTrade)
+            .filter(
+                TheoryTrade.symbol == trade.symbol,
+                TheoryTrade.entry_time == entry_time,
+                TheoryTrade.pattern == pattern,
+            )
+            .one_or_none()
+        )
+        if row is None:
+            row = TheoryTrade(
+                symbol=trade.symbol,
+                side=trade.side.value,
+                pattern=pattern,
+                entry_index=int(trade.entry_index),
+                entry_price=float(trade.entry_price),
+                entry_time=entry_time,
+                stop_loss=trade.stop_loss,
+                take_profit=trade.take_profit,
+                margin=float(trade.margin),
+                rr_used=float(trade.score),
+            )
+            self.session.add(row)
+        row.entry_index = int(trade.entry_index)
+        row.entry_price = float(trade.entry_price)
+        row.stop_loss = trade.stop_loss
+        row.take_profit = trade.take_profit
+        row.margin = float(trade.margin)
+        row.rr_used = float(trade.score)
+        row.commission = float(trade.commission or 0.0)
+        row.status = "open" if trade.is_open else "closed"
+        row.exit_index = trade.exit_index
+        row.exit_price = trade.exit_price
+        row.exit_time = str(trade.exit_time) if trade.exit_time is not None else None
+        row.exit_reason = trade.exit_reason or None
+        row.pnl = float(trade.pnl or 0.0)
+        self.session.flush()
+        return row
+
+    def theory_snapshot(self) -> dict[str, Any]:
+        state = self.get_theory_state()
+        opens = (
+            self.session.query(TheoryTrade)
+            .filter(TheoryTrade.status == "open")
+            .order_by(TheoryTrade.entry_time)
+            .all()
+        )
+        closed = (
+            self.session.query(TheoryTrade)
+            .filter(TheoryTrade.status == "closed")
+            .order_by(TheoryTrade.id.desc())
+            .limit(50)
+            .all()
+        )
+        closed.reverse()
+        wins = sum(1 for t in closed if t.pnl > 0)
+
+        def row(t: TheoryTrade) -> dict[str, Any]:
+            return {
+                "id": t.id,
+                "symbol": t.symbol,
+                "side": t.side,
+                "pattern": t.pattern,
+                "entry_price": t.entry_price,
+                "entry_time": t.entry_time,
+                "stop_loss": t.stop_loss,
+                "take_profit": t.take_profit,
+                "margin": t.margin,
+                "rr_used": t.rr_used,
+                "commission": t.commission,
+                "status": t.status,
+                "exit_price": t.exit_price,
+                "exit_time": t.exit_time,
+                "exit_reason": t.exit_reason,
+                "pnl": t.pnl,
+            }
+
+        return {
+            "active": state is not None,
+            "strategy": state.strategy if state else "",
+            "initial_capital": state.initial_capital if state else 0.0,
+            "cash": state.cash if state else 0.0,
+            "equity": state.equity if state else 0.0,
+            "last_master_ts": state.last_master_ts if state else "",
+            "win_rate_recent": wins / len(closed) if closed else None,
+            "open_trades": [row(t) for t in opens],
+            "closed_trades": [row(t) for t in closed],
+        }
+
     def dashboard_snapshot(self) -> dict[str, Any]:
         pending = self.list_pending_ghosts()
         open_trades = self.open_trades()
@@ -347,8 +498,13 @@ class StateRepository:
                     "id": t.id,
                     "symbol": t.symbol,
                     "side": t.side,
+                    "entry_price": t.entry_price,
+                    "entry_time": t.entry_time,
+                    "stop_loss": t.stop_loss,
+                    "take_profit": t.take_profit,
                     "pnl": t.pnl,
                     "exit_reason": t.exit_reason,
+                    "exit_time": t.exit_time,
                 }
                 for t in closed[-50:]
             ],

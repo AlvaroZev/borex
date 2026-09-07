@@ -12,7 +12,7 @@ Windows-hosted MT5 demo live service. Strategies come from `borex-main` / monore
 
 | Flag | Value | Notes |
 |------|-------|--------|
-| `--strategy` | `alexg7aligned` | Video2 ghost + London–NY overlap (12:00–16:00 UTC) for new setups |
+| `--strategy` | `alexg8` | Temporary all-session data collection; same geometry as g7aligned |
 | `--leverage` / `-l` | `5000` | |
 | `--rr-factor` | `1.88` | Must pass explicitly (CLI default is still 2.5) |
 | `--min-rr` | `3.0` | |
@@ -20,11 +20,33 @@ Windows-hosted MT5 demo live service. Strategies come from `borex-main` / monore
 | `--position-size` | `0.01` | 1% risk |
 | `--max-positions` | `60` | All FX pairs |
 | `--interval` / `-i` | `1h` | |
+| `--warmup-bars` | `10000` | Continuous MT5-only history; no Dukascopy/Yahoo mixing |
+| `--catchup-bars` | `500` | Recovers about three weeks after laptop sleep |
 | `--port` | `8790` | Dashboard |
 | `--no-same-bar-exit` | (on) | Default is off; pass explicitly to match backtests |
+| `--commission-per-lot` | `7.0` | Round-turn USD / lot (matches backtest) |
+| `--risk-include-commission` | (on) | Size so SL + commission ≈ 1% |
 | `--demo` | (on) | Uses `MT5_LOGIN` / `MT5_PASSWORD` / `MT5_DEMO_SERVER` from `.env` |
 
-Session filter for `alexg7aligned`: **overlap only**. Ghost fills do **not** re-check session.
+Session filter for current `alexg8`: **all sessions**.
+
+**Live↔theory parity (restart-safe):**
+- Waiting DB ghosts are **not** restored; last ~72 H1 bars are replayed with **no MT5 orders**
+- Startup and laptop-sleep gaps are stepped in order with **no retroactive orders**
+- Warmup is a single continuous MT5 timeline (10,000 requested H1 bars per pair)
+- Ghost fill = tagging-bar **close** (not live ask/bid; theory uses `|fill:close|` for g7aligned/g8)
+- Broker SL/TP is re-anchored to the actual market fill after `order_send`
+- Dynamic RR ignores sample WR until **20** closed trades (avoids 1.88↔5.64 swings)
+- Lot size nets **$7/lot** commission like the backtest
+- MT5 bar times converted from **broker server clock → UTC** (overlap is real UTC)
+- Closed-deal history queries use the same server-clock conversion
+- Dashboard hides smoke EA / strategy-tester tickets (magic ≠ 88001)
+- Dashboard runs an isolated, persistent **theory shadow** on the same closed MT5
+  bars and shows real/theory opens, closes, and pair/side/entry-hour matches side
+  by side. The shadow has no MT5 client or execution-router access.
+- The theory epoch starts when this version first runs. On later restarts it
+  restores its portfolio and processes every available missed H1 bar; real live
+  still never submits retroactive orders.
 
 Related strategy: `alexg8` = same geometry as `alexg7aligned` but `session="all"`.
 
@@ -177,13 +199,15 @@ $env:PYTHONIOENCODING = "utf-8"
   --max-positions 60 `
   --interval 1h `
   --port 8790 `
-  --no-same-bar-exit
+  --no-same-bar-exit `
+  --commission-per-lot 7.0 `
+  --risk-include-commission
 ```
 
 One-liner:
 
 ```powershell
-cd c:\Users\azeva\OneDrive\Documentos\work\trading\borex_live; $env:PYTHONIOENCODING="utf-8"; .\.venv311\Scripts\python.exe mt5service.py --demo --strategy alexg7aligned --leverage 5000 --rr-factor 1.88 --min-rr 3.0 --capital 889.69 --position-size 0.01 --max-positions 60 --interval 1h --port 8790 --no-same-bar-exit
+cd c:\Users\azeva\OneDrive\Documentos\work\trading\borex_live; $env:PYTHONIOENCODING="utf-8"; .\.venv311\Scripts\python.exe mt5service.py --demo --strategy alexg7aligned --leverage 5000 --rr-factor 1.88 --min-rr 3.0 --capital 889.69 --position-size 0.01 --max-positions 60 --interval 1h --port 8790 --no-same-bar-exit --commission-per-lot 7.0 --risk-include-commission
 ```
 
 Open UI: [http://127.0.0.1:8790/](http://127.0.0.1:8790/)
@@ -219,7 +243,7 @@ Then restart live with the **same** `--capital 889.69`.
 ### alexg8 (same as g7aligned, all sessions)
 
 ```powershell
-.\.venv311\Scripts\python.exe mt5service.py --demo --strategy alexg8 --leverage 5000 --rr-factor 1.88 --min-rr 3.0 --capital 889.69 --position-size 0.01 --max-positions 60 --interval 1h --port 8790 --no-same-bar-exit
+.\.venv311\Scripts\python.exe mt5service.py --demo --strategy alexg8 --leverage 5000 --rr-factor 1.88 --min-rr 3.0 --capital 889.69 --position-size 0.01 --max-positions 60 --interval 1h --warmup-bars 10000 --catchup-bars 500 --port 8790 --no-same-bar-exit --commission-per-lot 7.0 --risk-include-commission
 ```
 
 ### Dry-run (no MT5 orders; DB optional)
@@ -270,7 +294,7 @@ Notes:
 | Flag | Default | Our value |
 |------|---------|-----------|
 | `--demo` | off | **on** |
-| `--strategy` | `alexg7` | **`alexg7aligned`** |
+| `--strategy` | `alexg7` | **`alexg8`** (temporary all-session run) |
 | `--leverage` | `5000` | `5000` |
 | `--rr-factor` | `2.5` | **`1.88`** |
 | `--min-rr` | `3.0` | `3.0` |
@@ -280,6 +304,8 @@ Notes:
 | `--interval` | `1h` | `1h` |
 | `--port` | `8790` | `8790` |
 | `--poll` | `30` | (default) seconds between bar checks |
+| `--warmup-bars` | `10000` | `10000` MT5 H1 bars requested per pair |
+| `--catchup-bars` | `500` | `500` bars after a running-process gap |
 | `--same-bar-exit` / `--no-same-bar-exit` | no same-bar | **`--no-same-bar-exit`** |
 | `--db` | `DATABASE_URL` | local Docker URL |
 | `--db-backup` | `DATABASE_BACKUP_URL` | Railway |

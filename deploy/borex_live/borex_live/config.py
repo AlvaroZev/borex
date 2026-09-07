@@ -9,7 +9,7 @@ from pathlib import Path
 class LiveServiceConfig:
     strategy: str = "alexg7"
     demo: bool = True
-    capital: float = 1000.0
+    capital: float = 0.0  # 0 = fetch MT5 balance at startup
     leverage: float = 5000.0
     rr_factor: float = 2.5
     # alexg7/8 backtests use 3.0; alexg5 historically used 2.0 + rr_factor.
@@ -27,7 +27,11 @@ class LiveServiceConfig:
     dry_run: bool = False
     port: int = 8790
     host: str = "127.0.0.1"
-    warmup_bars: int = 300
+    # ~19 months for majors on this broker; at least ~10 months for all 60.
+    # Live and theory must use this same continuous MT5 history.
+    warmup_bars: int = 10_000
+    # Covers a long laptop sleep while the process remains alive (~3 weeks H1).
+    catchup_bars: int = 500
     database_url: str = ""
     # Optional Railway (or other) mirror; live never depends on this for trading.
     database_backup_url: str = ""
@@ -40,6 +44,19 @@ class LiveServiceConfig:
     borex_main_root: Path | None = None
     # False = do not evaluate SL/TP on the entry bar (matches backtest default).
     same_bar_exit: bool = False
+    commission_per_lot: float = 7.0
+    min_commission_per_side: float = 0.04
+    lot_notional: float = 100_000.0
+    risk_include_commission: bool = True
+    winrate_min_trades: int = 20
+    rr_mode: str = "dynamic"
+    rr_min: float = 0.0
+    rr_max: float = 0.0
+    commission_at_entry: bool = False
+    force_flat_friday: bool = False
+    force_flat_daily: bool = False
+    force_flat_utc_hour: int = 19
+    force_flat_friday_from_hour: int = 19
 
     @classmethod
     def from_env(cls) -> LiveServiceConfig:

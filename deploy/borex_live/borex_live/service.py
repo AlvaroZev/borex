@@ -24,11 +24,12 @@ from borex_live.data.feed import (
     refresh_ltf_bars,
 )
 from borex_live.engine.live_engine import LiveEngine
+from borex_live.engine.shadow_engine import ShadowEngine
 from borex_live.entry_mode import EntryMode
-from borex_live.execution.router import ExecutionRouter, restore_pending_to_strategy
+from borex_live.execution.router import ExecutionRouter, read_pending_snapshot
 from borex_live.mt5.client import Mt5Client
 from borex_live.store.models import init_db
-from borex_live.store.repository import GhostSnapshot, StateRepository
+from borex_live.store.repository import StateRepository
 from borex_live.strategy_registry import create_strategy
 
 logger = logging.getLogger(__name__)
@@ -50,9 +51,11 @@ class LiveService:
         self.ltf_by_symbol: dict[str, dict[str, list[Candle]]] = {}
         self.master_symbol: str = cfg.master_yahoo
         self._live_started_at: pd.Timestamp | None = None
+        self._last_process_at: pd.Timestamp | None = None
         self._stop = threading.Event()
         self._runtime: dict[str, Any] = {"status": "init"}
         self._strategy: Any = None
+        self.shadow: ShadowEngine | None = None
         self._last_session_status_hour: str | None = None
         self._last_backup_at: float = 0.0
         self._backup_lock = threading.Lock()
@@ -63,6 +66,59 @@ class LiveService:
 
     def _session(self):
         return self.session_factory()
+
+    def _apply_startup_capital(self) -> None:
+        """Resolve cfg.capital from MT5 balance (or DB/fallback) for live + theory.
+
+        Use balance, not equity: floating PnL must not inflate theory epoch
+        capital or live risk sizing while positions are open.
+        """
+        explicit = float(self.cfg.capital or 0.0)
+        if explicit > 0:
+            self._runtime["capital"] = explicit
+            self._runtime["capital_source"] = "cli"
+            logger.info("Using configured capital $%.2f", explicit)
+            return
+
+        fetched = 0.0
+        source = "fallback"
+        if self.mt5.connected and not self.mt5.dry_run:
+            try:
+                fetched = float(self.mt5.account_balance() or 0.0)
+                if fetched <= 0:
+                    fetched = float(self.mt5.account_equity() or 0.0)
+                if fetched > 0:
+                    source = "mt5_balance"
+            except Exception:
+                logger.exception("MT5 balance read failed; trying DB fallback")
+
+        if fetched <= 0:
+            try:
+                with self._session() as session:
+                    pf = StateRepository(session).get_portfolio(0.0)
+                    fetched = float(pf.initial_capital or pf.cash or 0.0)
+                    if fetched > 0:
+                        source = "db"
+            except Exception:
+                logger.debug("DB capital fallback unavailable", exc_info=True)
+
+        if fetched <= 0:
+            fetched = 1000.0
+            source = "fallback"
+            logger.warning(
+                "No MT5/DB capital; using dry-run fallback $%.2f (pass --capital to override)",
+                fetched,
+            )
+        else:
+            logger.info(
+                "Auto capital $%.2f from %s (used for live sizing, theory epoch, ghost)",
+                fetched,
+                source,
+            )
+
+        self.cfg.capital = fetched
+        self._runtime["capital"] = fetched
+        self._runtime["capital_source"] = source
 
     def start(self) -> None:
         if self.cfg.borex_main_root:
@@ -75,6 +131,7 @@ class LiveService:
         self.mt5.password = password
         self.mt5.server = server
         self.mt5.connect()
+        self._apply_startup_capital()
 
         strategy, spec = create_strategy(
             self.cfg.strategy,
@@ -101,6 +158,16 @@ class LiveService:
         self.candles_by_symbol = load_universe(symbols, self.cfg, self.mt5)
         symbols = list(self.candles_by_symbol.keys())
         self._attach_ltf(strategy, symbols)
+        shadow_strategy, _ = create_strategy(
+            self.cfg.strategy,
+            min_rr=self.cfg.min_rr,
+            second_signal=self.cfg.second_signal,
+            execution_interval=self.cfg.interval,
+            ltf_intervals=self.cfg.ltf_intervals,
+            ltf_confirm_mode=self.cfg.ltf_confirm_mode,
+        )
+        if hasattr(shadow_strategy, "attach_ltf"):
+            shadow_strategy.attach_ltf(self.ltf_by_symbol)
         # Prefer configured master if it has bars; else densest series; else configured master.
         preferred = self.cfg.master_yahoo
         if preferred in self.candles_by_symbol and self.candles_by_symbol[preferred]:
@@ -143,24 +210,9 @@ class LiveService:
                 asdict(self.cfg),
             )
             pf = repo.get_portfolio(self.cfg.capital)
+            pf.initial_capital = float(self.cfg.capital)
             if pf.cash <= 0:
                 repo.set_cash(self.cfg.capital)
-
-            ghosts = [
-                GhostSnapshot(
-                    symbol=g.symbol,
-                    action=g.action,
-                    pattern=g.pattern,
-                    stop_loss=g.stop_loss,
-                    take_profit=g.take_profit,
-                    planned_entry=g.planned_entry,
-                    created_index=g.created_index,
-                    expires_index=g.expires_index,
-                    saw_near_sl=g.saw_near_sl,
-                )
-                for g in repo.list_pending_ghosts()
-            ]
-            restore_pending_to_strategy(strategy, ghosts)
 
             router = ExecutionRouter(
                 entry_mode=spec.entry_mode,
@@ -168,6 +220,7 @@ class LiveService:
                 repo=repo,
                 default_lot=self.cfg.default_lot,
                 dry_run=self.mt5.dry_run,
+                leverage=self.cfg.leverage,
             )
             # H1-close mode: ghosts wait in DB; cancel any old MT5 limits.
             n_cancel = router.cancel_leftover_broker_pendings()
@@ -177,12 +230,44 @@ class LiveService:
                     n_cancel,
                 )
             self.engine = LiveEngine(strategy, self.cfg, repo, router, spec.entry_mode)
+            n_clear = repo.invalidate_all_waiting_ghosts("restart_replay")
+            if n_clear:
+                logger.info(
+                    "Cleared %d waiting DB ghost(s); will rebuild via replay (no MT5)",
+                    n_clear,
+                )
             session.commit()
 
+        theory_start: dict[str, Any] = {"mode": "disabled", "processed": 0}
+        try:
+            self.shadow = ShadowEngine(
+                shadow_strategy,
+                self.cfg,
+                self.engine.bt_config,
+            )
+            with self._session() as session:
+                theory_start = self.shadow.start(
+                    StateRepository(session),
+                    self.candles_by_symbol,
+                    self.master_symbol,
+                )
+                session.commit()
+        except Exception:
+            self.shadow = None
+            logger.exception("Theory shadow failed to start; live execution remains active")
+
+        off = int(getattr(self.mt5, "server_offset_seconds", 0) or 0)
+        if off:
+            logger.info(
+                "MT5 server clock offset %ds (%.1fh) — bar times converted to UTC",
+                off,
+                off / 3600.0,
+            )
         self._live_started_at = pd.Timestamp.now(tz="UTC")
+        self._last_process_at = self._live_started_at
         self._runtime.update(
             {
-                "status": "running",
+                "status": "replaying",
                 "strategy": self.cfg.strategy,
                 "entry_mode": spec.entry_mode.value,
                 "ghost_entry": "h1_close_market",
@@ -202,7 +287,15 @@ class LiveService:
             self.master_symbol,
             "on" if self.cfg.database_backup_url else "off",
         )
+        logger.info(
+            "Theory shadow active | mode=%s | caught_up=%s | no MT5 execution",
+            theory_start.get("mode"),
+            theory_start.get("processed"),
+        )
         self._log_trading_session_status(reason="startup")
+        self._replay_recent_history()
+        self._runtime["status"] = "running"
+        logger.info("Startup replay complete; live polling is active")
         if self.cfg.database_backup_url and self.cfg.backup_interval_seconds > 0:
             self._maybe_backup_to_railway(force=True)
 
@@ -305,10 +398,62 @@ class LiveService:
         )
         if added:
             strategy.attach_ltf(self.ltf_by_symbol)
+            if self.shadow is not None and hasattr(self.shadow.strategy, "attach_ltf"):
+                self.shadow.strategy.attach_ltf(self.ltf_by_symbol)
             logger.debug("Refreshed %d LTF bars", added)
 
     def _master_index(self) -> int:
         return len(self.candles_by_symbol[self.master_symbol]) - 1
+
+    def _bar_close_ts(self, candle: Candle) -> pd.Timestamp:
+        open_ts = pd.Timestamp(candle.timestamp)
+        if open_ts.tzinfo is None:
+            open_ts = open_ts.tz_localize("UTC")
+        else:
+            open_ts = open_ts.tz_convert("UTC")
+        return open_ts + pd.Timedelta(seconds=_interval_seconds(self.cfg.interval))
+
+    def _replay_recent_history(self) -> None:
+        """Walk last ghost-wait H1 bars with no MT5 orders so `_pending` matches theory."""
+        if self.cfg.dry_run or not getattr(self, "engine", None):
+            return
+        master = self.candles_by_symbol.get(self.master_symbol) or []
+        min_bars = self.strategy_min_bars()
+        wait = int(getattr(self._strategy, "sl_wait_max_bars", 72) or 72)
+        start_i = max(min_bars, len(master) - wait)
+        if len(master) <= start_i:
+            return
+        logger.info(
+            "Replay %d closed H1 bars [%s → %s] without MT5 (rebuild ghosts)",
+            len(master) - start_i,
+            master[start_i].timestamp,
+            master[-1].timestamp,
+        )
+        with self._session() as session:
+            repo = StateRepository(session)
+            router = ExecutionRouter(
+                entry_mode=self.engine.entry_mode,
+                mt5=self.mt5,
+                repo=repo,
+                default_lot=self.cfg.default_lot,
+                dry_run=True,
+                leverage=self.cfg.leverage,
+            )
+            self.engine.repo = repo
+            self.engine.router = router
+            for mi in range(start_i, len(master)):
+                self.engine.step_master_bar(
+                    mi,
+                    self.candles_by_symbol,
+                    self.master_symbol,
+                    allow_broker_orders=False,
+                    sync_pending=False,
+                )
+            self.engine.router.sync_ghost_pending_orders(
+                {},
+                read_pending_snapshot(self.engine.strategy),
+            )
+            session.commit()
 
     def process_once(self) -> dict[str, Any]:
         """Process latest closed bars (call every loop or on H1 close)."""
@@ -333,6 +478,7 @@ class LiveService:
                 repo=repo,
                 default_lot=self.cfg.default_lot,
                 dry_run=self.mt5.dry_run,
+                leverage=self.cfg.leverage,
             )
             self.engine.repo = repo
             self.engine.router = router
@@ -350,11 +496,27 @@ class LiveService:
             router.reconcile_open_with_mt5()
             session.commit()
 
-        started = self._live_started_at or pd.Timestamp.now(tz="UTC")
-        interval_sec = _interval_seconds(self.cfg.interval)
+        now = pd.Timestamp.now(tz="UTC")
+        last_process = self._last_process_at
+        if last_process is not None and (now - last_process).total_seconds() > 300:
+            # The process likely resumed after laptop sleep. Reconstruct all
+            # missed bars, but never submit orders for bars closed while asleep.
+            self._live_started_at = now
+            logger.warning(
+                "Detected %.1f minute polling gap; missed bars are replay-only",
+                (now - last_process).total_seconds() / 60.0,
+            )
+        self._last_process_at = now
+        started = self._live_started_at or now
+        master_series = self.candles_by_symbol[self.master_symbol]
+        prev_master_last = master_series[-1].timestamp if master_series else None
 
         for sym in self.candles_by_symbol:
-            bars = self.mt5.fetch_bars(sym, self.cfg.interval, count=5)
+            bars = self.mt5.fetch_bars(
+                sym,
+                self.cfg.interval,
+                count=max(80, int(self.cfg.catchup_bars)),
+            )
             if not bars:
                 continue
             closed_bars = _drop_forming_bar(bars, self.cfg.interval)
@@ -364,38 +526,42 @@ class LiveService:
             series = self.candles_by_symbol[sym]
             live_series = self.live_candles_by_symbol.setdefault(sym, [])
             live_ts = {str(c.timestamp) for c in live_series}
+            series_tail = {str(c.timestamp) for c in series[-120:]}
 
             for closed in closed_bars:
-                open_ts = pd.Timestamp(closed.timestamp)
-                if open_ts.tzinfo is None:
-                    open_ts = open_ts.tz_localize("UTC")
-                else:
-                    open_ts = open_ts.tz_convert("UTC")
-                close_ts = open_ts + pd.Timedelta(seconds=interval_sec)
-
-                # Live page: only bars that *closed* after this service start
-                if close_ts <= started:
+                close_ts = self._bar_close_ts(closed)
+                ts_key = str(closed.timestamp)
+                if series and series[-1].timestamp == closed.timestamp:
+                    series[-1] = closed
                     continue
-                if str(closed.timestamp) in live_ts:
+                if ts_key in series_tail:
+                    continue
+                if series and series[-1].timestamp > closed.timestamp:
                     continue
 
-                if not series or series[-1].timestamp < closed.timestamp:
-                    series.append(closed)
-                elif series[-1].timestamp == closed.timestamp:
-                    series[-1] = closed  # refresh OHLC after finalize
-
-                live_series.append(closed)
-                live_ts.add(str(closed.timestamp))
-                new_live.append((sym, closed))
+                series.append(closed)
+                series_tail.add(ts_key)
                 new_bars += 1
-                logger.info(
-                    "live bar %s %s (closed %s) O=%.5f C=%.5f",
-                    sym,
-                    closed.timestamp,
-                    close_ts,
-                    closed.open,
-                    closed.close,
-                )
+                if close_ts > started:
+                    if ts_key not in live_ts:
+                        live_series.append(closed)
+                        live_ts.add(ts_key)
+                        new_live.append((sym, closed))
+                    logger.info(
+                        "live bar %s %s (closed %s) O=%.5f C=%.5f",
+                        sym,
+                        closed.timestamp,
+                        close_ts,
+                        closed.open,
+                        closed.close,
+                    )
+                else:
+                    logger.debug(
+                        "catch-up bar %s %s (closed %s) replay only",
+                        sym,
+                        closed.timestamp,
+                        close_ts,
+                    )
 
         if new_bars == 0:
             out = {"skipped": "no_new_bar", "ghost_fills": len(ghost_fills)}
@@ -403,7 +569,42 @@ class LiveService:
                 self._runtime["last_tick"] = out
             return out
 
-        master_i = self._master_index()
+        after_fetch = pd.Timestamp.now(tz="UTC")
+        if (after_fetch - now).total_seconds() > 300:
+            started = after_fetch
+            self._live_started_at = after_fetch
+            logger.warning("Long fetch/sleep detected; fetched bars are replay-only")
+
+        master_series = self.candles_by_symbol[self.master_symbol]
+        step_from = max(self.strategy_min_bars(), len(master_series) - 1)
+        if prev_master_last is not None:
+            for i, c in enumerate(master_series):
+                if str(c.timestamp) == str(prev_master_last):
+                    step_from = i + 1
+                    break
+            else:
+                step_from = max(
+                    self.strategy_min_bars(),
+                    len(master_series) - max(80, int(self.cfg.catchup_bars)),
+                )
+
+        signals_n = 0
+        exits_n = 0
+        theory_bars = 0
+        last_mi = self._master_index()
+        if self.shadow is not None:
+            try:
+                with self._session() as theory_session:
+                    theory_bars = self.shadow.process_available(
+                        StateRepository(theory_session),
+                        self.candles_by_symbol,
+                        self.master_symbol,
+                    )
+                    theory_session.commit()
+            except Exception:
+                logger.exception(
+                    "Theory shadow failed this tick; live execution continues independently"
+                )
         with self._session() as session:
             repo = StateRepository(session)
             for sym, candle in new_live:
@@ -423,13 +624,32 @@ class LiveService:
                 repo=repo,
                 default_lot=self.cfg.default_lot,
                 dry_run=self.mt5.dry_run,
+                leverage=self.cfg.leverage,
             )
             self.engine.repo = repo
             self.engine.router = router
-            result = self.engine.step_master_bar(
-                master_i,
-                self.candles_by_symbol,
-                self.master_symbol,
+            result = None
+            pending_before = read_pending_snapshot(self.engine.strategy)
+            for mi in range(step_from, len(master_series)):
+                allow = self._bar_close_ts(master_series[mi]) > started
+                result = self.engine.step_master_bar(
+                    mi,
+                    self.candles_by_symbol,
+                    self.master_symbol,
+                    allow_broker_orders=allow,
+                    sync_pending=False,
+                )
+                last_mi = mi
+                signals_n += len(result.signals)
+                exits_n += len(result.exits)
+                if not allow:
+                    logger.info(
+                        "replay master %s (no MT5 orders)",
+                        master_series[mi].timestamp,
+                    )
+            router.sync_ghost_pending_orders(
+                pending_before,
+                read_pending_snapshot(self.engine.strategy),
             )
             for sym in self.candles_by_symbol:
                 c = self.candles_by_symbol[sym][-1]
@@ -438,10 +658,11 @@ class LiveService:
             snap = repo.dashboard_snapshot()
 
         out = {
-            "master_index": result.master_index,
-            "signals": len(result.signals),
-            "exits": len(result.exits),
+            "master_index": last_mi,
+            "signals": signals_n,
+            "exits": exits_n,
             "new_live_bars": len(new_live),
+            "theory_bars": theory_bars,
             "ghost_fills": len(ghost_fills),
             "dashboard": snap,
         }
@@ -509,6 +730,7 @@ class LiveService:
                     repo=repo,
                     default_lot=self.cfg.default_lot,
                     dry_run=self.mt5.dry_run,
+                    leverage=self.cfg.leverage,
                 )
                 margin = self.engine._margin_for_entry()
                 fills = router.sync_ghost_fills(
@@ -521,6 +743,7 @@ class LiveService:
                     repo.set_cash(repo.get_portfolio(self.cfg.capital).cash - margin)
                 router.reconcile_open_with_mt5()
             snap = repo.dashboard_snapshot()
+            snap["theory"] = repo.theory_snapshot()
             session.commit()
 
         # Live broker state (always prefer MT5 for open display)
@@ -528,9 +751,9 @@ class LiveService:
         pending_mt5: list[dict[str, Any]] = []
         if self.mt5.connected and not self.mt5.dry_run:
             for p in self.mt5.open_positions():
-                if p.magic != self.mt5.MAGIC and "borex" not in (p.comment or "").lower():
-                    # Still show account positions so the UI matches MT5 Trade
-                    pass
+                if not self.mt5.owns_position(p):
+                    # Hide mirror (88002), smoke EA, tester, manual.
+                    continue
                 yahoo = mt5_to_yahoo(p.symbol)
                 mt5_rows.append(
                     {
@@ -637,6 +860,28 @@ class LiveService:
         snap["mt5_positions"] = mt5_rows
         snap["pending_orders_mt5"] = pending_mt5
         snap["pending_ghosts"] = enriched_ghosts
+        theory = snap.get("theory") or {}
+        for trade in theory.get("open_trades") or []:
+            series = self.candles_by_symbol.get(trade["symbol"]) or []
+            if not series or not trade.get("entry_price"):
+                trade["floating_pnl"] = None
+                continue
+            price = float(series[-1].close)
+            entry = float(trade["entry_price"])
+            direction = 1.0 if trade.get("side") in ("long", "buy") else -1.0
+            trade["floating_pnl"] = (
+                float(trade.get("margin") or 0.0)
+                * ((price - entry) / entry)
+                * float(self.cfg.leverage)
+                * direction
+            )
+        theory["comparison"] = self._theory_live_comparison(
+            open_merged,
+            snap.get("closed_trades") or [],
+            theory.get("open_trades") or [],
+            theory.get("closed_trades") or [],
+        )
+        snap["theory"] = theory
         snap["runtime"] = self.runtime
         snap["entry_mode"] = self.runtime.get("entry_mode")
         snap["account"] = self._account_live_snapshot(
@@ -645,6 +890,94 @@ class LiveService:
             closed_trades=snap.get("closed_trades") or [],
         )
         return snap
+
+    @staticmethod
+    def _theory_live_comparison(
+        live_open: list[dict[str, Any]],
+        live_closed: list[dict[str, Any]],
+        theory_open: list[dict[str, Any]],
+        theory_closed: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Greedily match pair/side/entry-hour and expose every mismatch."""
+
+        def side(value: object) -> str:
+            return "buy" if str(value).lower() in ("buy", "long") else "sell"
+
+        def hour(value: object) -> str:
+            if not value:
+                return ""
+            try:
+                return str(pd.Timestamp(value).floor("h"))
+            except Exception:
+                return str(value)
+
+        live = [*live_closed, *live_open]
+        theory = [*theory_closed, *theory_open]
+        live_used: set[int] = set()
+        rows: list[dict[str, Any]] = []
+        for theoretical in theory:
+            key = (
+                theoretical.get("symbol"),
+                side(theoretical.get("side")),
+                hour(theoretical.get("entry_time")),
+            )
+            match_i = next(
+                (
+                    i
+                    for i, actual in enumerate(live)
+                    if i not in live_used
+                    and (
+                        actual.get("symbol"),
+                        side(actual.get("side")),
+                        hour(actual.get("entry_time")),
+                    )
+                    == key
+                ),
+                None,
+            )
+            actual = live[match_i] if match_i is not None else None
+            if match_i is not None:
+                live_used.add(match_i)
+            rows.append(
+                {
+                    "status": "matched" if actual else "theory_only",
+                    "symbol": theoretical.get("symbol"),
+                    "side": side(theoretical.get("side")),
+                    "entry_hour": key[2],
+                    "theory": theoretical,
+                    "live": actual,
+                    "entry_delta": (
+                        float(actual["entry_price"]) - float(theoretical["entry_price"])
+                        if actual
+                        and actual.get("entry_price") is not None
+                        and theoretical.get("entry_price") is not None
+                        else None
+                    ),
+                    "pnl_delta": (
+                        float(actual["pnl"]) - float(theoretical["pnl"])
+                        if actual
+                        and actual.get("pnl") is not None
+                        and theoretical.get("pnl") is not None
+                        else None
+                    ),
+                }
+            )
+        for i, actual in enumerate(live):
+            if i in live_used:
+                continue
+            rows.append(
+                {
+                    "status": "live_only",
+                    "symbol": actual.get("symbol"),
+                    "side": side(actual.get("side")),
+                    "entry_hour": hour(actual.get("entry_time")),
+                    "theory": None,
+                    "live": actual,
+                    "entry_delta": None,
+                    "pnl_delta": None,
+                }
+            )
+        return rows[-100:]
 
     def _account_live_snapshot(
         self,
@@ -750,11 +1083,14 @@ class LiveService:
         dash = self.dashboard_payload()
         account = dash.get("account") or {}
         wr = dash.get("win_rate")
+        closed_n = len(dash.get("closed_trades") or [])
         rr = resolve_rr(
             rr_mode="dynamic",
             fixed_rr=self.cfg.min_rr,
             winrate=wr,
             rr_factor=self.cfg.rr_factor,
+            closed_trades=closed_n,
+            winrate_min_trades=int(getattr(self.cfg, "winrate_min_trades", 20) or 20),
         )
         live_equity = float(account.get("display_equity") or 0.0)
         if live_equity <= 0:
@@ -869,16 +1205,21 @@ class LiveService:
             return
         if not self._backup_lock.acquire(blocking=False):
             return
-        try:
-            from borex_live.store.backup_sync import sync_local_to_backup
 
-            counts = sync_local_to_backup(self.cfg.database_url, backup_url)
-            self._last_backup_at = time.monotonic()
-            logger.info("DB backup sync local→Railway ok | %s", counts)
-        except Exception:
-            logger.exception("DB backup sync failed (trading continues on local DB)")
-        finally:
-            self._backup_lock.release()
+        def _sync() -> None:
+            try:
+                from borex_live.store.backup_sync import sync_local_to_backup
+
+                counts = sync_local_to_backup(self.cfg.database_url, backup_url)
+                self._last_backup_at = time.monotonic()
+                logger.info("DB backup sync local→Railway ok | %s", counts)
+            except Exception:
+                logger.exception("DB backup sync failed (trading continues on local DB)")
+            finally:
+                self._backup_lock.release()
+
+        # Railway is a backup only. Its latency/outages must never pause MT5 polling.
+        threading.Thread(target=_sync, name="borex-db-backup", daemon=True).start()
 
     def run_loop(self, poll_seconds: int = 30) -> None:
         self.start()

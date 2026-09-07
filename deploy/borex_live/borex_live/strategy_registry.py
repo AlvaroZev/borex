@@ -36,6 +36,7 @@ def build_strategy_registry() -> dict[str, StrategySpec]:
         AlexG7AlignedStrategy,
         AlexG7Strategy,
         AlexG8Strategy,
+        AlexG9Strategy,
     )
     from borex.alexg.ablation import video1_default, video2_winner
 
@@ -81,6 +82,12 @@ def build_strategy_registry() -> dict[str, StrategySpec]:
             execution_interval=kw.get("execution_interval", "1h"),
         )
 
+    def g9(**kw):
+        return AlexG9Strategy(
+            min_rr=kw.get("min_rr", 3.0),
+            execution_interval=kw.get("execution_interval", "1h"),
+        )
+
     return {
         "alexg3": StrategySpec("alexg3", EntryMode.IMMEDIATE, g3),
         "alexg4": StrategySpec("alexg4", EntryMode.GHOST, g4),
@@ -90,6 +97,7 @@ def build_strategy_registry() -> dict[str, StrategySpec]:
         "alexg7": StrategySpec("alexg7", EntryMode.GHOST, g7),
         "alexg7aligned": StrategySpec("alexg7aligned", EntryMode.GHOST, g7aligned),
         "alexg8": StrategySpec("alexg8", EntryMode.GHOST, g8),
+        "alexg9": StrategySpec("alexg9", EntryMode.GHOST, g9),
     }
 
 

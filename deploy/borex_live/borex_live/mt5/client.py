@@ -31,10 +31,42 @@ class Mt5Position:
     comment: str = ""
 
 
+def dollar_exit_reason(
+    profit: float,
+    expected_win: float,
+    expected_loss: float,
+    *,
+    abs_eps: float = 0.05,
+    rel_eps: float = 0.01,
+) -> str | None:
+    """If broker floating PnL has reached the intended $ target, return why.
+
+    Band is max($0.05, 1% of the target) so a $13.65 TP fires at ~$13.51+
+    and is not left open waiting for an H1 close or a missing ticket TP.
+    """
+    win = float(expected_win or 0.0)
+    loss = float(expected_loss or 0.0)
+    pnl = float(profit)
+    if win > 0 and pnl >= win - max(abs_eps, win * rel_eps):
+        return "dollar_tp"
+    if loss > 0 and pnl <= -loss + max(abs_eps, loss * rel_eps):
+        return "dollar_sl"
+    return None
+
+
 class Mt5Client:
     """Thin MetaTrader5 wrapper. Safe to construct without terminal (dry-run)."""
 
     MAGIC = 88001
+    # Comments this process owns. Mirror uses bx_m| + magic 88002 so both
+    # can share one MT5 account without stealing each other's positions.
+    COMMENT_PREFIXES: tuple[str, ...] = (
+        "bx_h1|",
+        "bx_g|",
+        "bx_i|",
+        "borex_live",
+        "borex_flat",
+    )
 
     TIMEFRAME_MAP = {
         "1m": "TIMEFRAME_M1",
@@ -62,6 +94,7 @@ class Mt5Client:
         self.dry_run = dry_run
         self._mt5: Any = None
         self._connected = False
+        self.server_offset_seconds: int = 0
 
     def connect(self) -> None:
         """
@@ -128,6 +161,19 @@ class Mt5Client:
                 hint = " IPC timeout: enable Algo Trading / try portable MT5 install."
             raise RuntimeError(f"MT5 initialize failed: {err}.{hint}")
         self._connected = True
+        self._refresh_server_offset()
+
+    def _refresh_server_offset(self) -> None:
+        """Detect broker server clock vs UTC (ICMarkets often GMT+2/+3)."""
+        if self.dry_run or self._mt5 is None:
+            self.server_offset_seconds = 0
+            return
+        try:
+            from borex.data.mt5_time import measure_mt5_server_offset_seconds
+
+            self.server_offset_seconds = measure_mt5_server_offset_seconds(self._mt5)
+        except Exception:
+            self.server_offset_seconds = 0
 
     def disconnect(self) -> None:
         if self._mt5 is not None and not self.dry_run and self._connected:
@@ -205,8 +251,18 @@ class Mt5Client:
                 f"MT5 copy_rates_from_pos failed for {mt5_sym}: {self._mt5.last_error()}"
             )
         candles: list[Candle] = []
+        try:
+            from borex.data.mt5_time import mt5_unix_to_utc, snap_h1_open
+
+            to_utc = lambda t: mt5_unix_to_utc(int(t), self.server_offset_seconds)
+        except Exception:
+            to_utc = lambda t: datetime.fromtimestamp(int(t), tz=timezone.utc)
+            snap_h1_open = None
+        hourly = interval.strip().lower() in {"1h", "h1"}
         for row in rates:
-            ts = datetime.fromtimestamp(int(row["time"]), tz=timezone.utc)
+            ts = to_utc(row["time"])
+            if hourly and snap_h1_open is not None:
+                ts = snap_h1_open(ts)
             candles.append(
                 Candle(
                     timestamp=ts,
@@ -251,6 +307,67 @@ class Mt5Client:
             return None
         return float(tick.ask) if side.lower() == "buy" else float(tick.bid)
 
+    def normalize_price(self, yahoo_symbol: str, price: float) -> float:
+        """Round a computed level to the broker symbol's valid precision."""
+        return self._normalize_price(self.ensure_symbol(yahoo_symbol), float(price))
+
+    def _pnl_per_price_unit_per_lot(self, mt5_sym: str) -> float:
+        """Account-currency PnL for a 1.0 price move on 1 lot (broker tick math)."""
+        mt5 = self._mt5
+        info = mt5.symbol_info(mt5_sym) if mt5 is not None else None
+        if info is None:
+            return 0.0
+        tick_size = float(getattr(info, "trade_tick_size", 0.0) or info.point or 0.0)
+        tick_value = float(getattr(info, "trade_tick_value", 0.0) or 0.0)
+        if tick_size > 0 and tick_value > 0:
+            return tick_value / tick_size
+        return float(getattr(info, "trade_contract_size", 0.0) or 100_000.0)
+
+    def price_move_for_usd(
+        self, yahoo_symbol: str, volume: float, usd: float
+    ) -> float:
+        """Price distance that realizes ``usd`` on this fill volume."""
+        if volume <= 0 or usd <= 0 or self.dry_run or self._mt5 is None:
+            return 0.0
+        mt5_sym = self.ensure_symbol(yahoo_symbol)
+        per_lot = self._pnl_per_price_unit_per_lot(mt5_sym)
+        if per_lot <= 0:
+            return 0.0
+        return abs(float(usd)) / (float(volume) * per_lot)
+
+    def stops_for_dollar_targets(
+        self,
+        yahoo_symbol: str,
+        side: str,
+        fill: float,
+        volume: float,
+        loss_usd: float,
+        win_usd: float,
+    ) -> tuple[float | None, float | None]:
+        """SL/TP prices from the *actual* fill so broker PnL ≈ intended $ risk/reward.
+
+        Uses the same tick_value math as ``lots_for_risk``. Fill slippage is
+        absorbed by recentering on ``fill``; dollar distances stay those of the
+        filled volume, not the theory entry.
+        """
+        if fill <= 0 or volume <= 0:
+            return None, None
+        sl_move = self.price_move_for_usd(yahoo_symbol, volume, loss_usd)
+        tp_move = self.price_move_for_usd(yahoo_symbol, volume, win_usd)
+        if sl_move <= 0 or tp_move <= 0:
+            return None, None
+        side_l = side.lower()
+        if side_l in ("buy", "long"):
+            sl = fill - sl_move
+            tp = fill + tp_move
+        else:
+            sl = fill + sl_move
+            tp = fill - tp_move
+        return (
+            self.normalize_price(yahoo_symbol, sl),
+            self.normalize_price(yahoo_symbol, tp),
+        )
+
     def lots_for_risk(
         self,
         yahoo_symbol: str,
@@ -279,14 +396,8 @@ class Mt5Client:
         if sl_dist <= 0:
             return 0.0
 
-        tick_size = float(getattr(info, "trade_tick_size", 0.0) or info.point or 0.0)
-        tick_value = float(getattr(info, "trade_tick_value", 0.0) or 0.0)
-        if tick_size <= 0 or tick_value <= 0:
-            # Fallback: contract_size × price_move in quote, treat as account ccy
-            contract = float(getattr(info, "trade_contract_size", 0.0) or 100_000.0)
-            loss_per_lot = contract * sl_dist
-        else:
-            loss_per_lot = (sl_dist / tick_size) * tick_value
+        per_lot = self._pnl_per_price_unit_per_lot(mt5_sym)
+        loss_per_lot = sl_dist * per_lot
         if loss_per_lot <= 0:
             return 0.0
 
@@ -316,8 +427,15 @@ class Mt5Client:
         from datetime import timedelta
 
         mt5 = self._mt5
-        end = datetime.now(timezone.utc)
-        start = end - timedelta(days=lookback_days)
+        end_utc = datetime.now(timezone.utc)
+        start_utc = end_utc - timedelta(days=lookback_days)
+        try:
+            from borex.data.mt5_time import utc_to_mt5_request
+
+            start = utc_to_mt5_request(start_utc, self.server_offset_seconds)
+            end = utc_to_mt5_request(end_utc, self.server_offset_seconds)
+        except Exception:
+            start, end = start_utc, end_utc
         deals = mt5.history_deals_get(start, end)
         if not deals:
             return None
@@ -369,15 +487,49 @@ class Mt5Client:
         orders = self._mt5.orders_get(ticket=int(ticket))
         return bool(orders)
 
+    def owns_position(self, pos: Mt5Position) -> bool:
+        """True if this client opened the position (magic or our comment prefix).
+
+        Another process on the same account (mirror magic 88002 / bx_m|) is ignored.
+        """
+        magic = int(pos.magic or 0)
+        if magic == int(self.MAGIC):
+            return True
+        if magic != 0:
+            return False
+        comment = str(pos.comment or "")
+        prefixes = getattr(self, "COMMENT_PREFIXES", ()) or ()
+        return any(comment.startswith(p) for p in prefixes)
+
     def position_for_ghost(self, yahoo_symbol: str) -> Mt5Position | None:
         """Find an open position opened by this service for the pair."""
         mt5_sym = yahoo_to_mt5(yahoo_symbol)
         for p in self.open_positions(yahoo_symbol):
             if p.symbol != mt5_sym:
                 continue
-            if p.magic == self.MAGIC or "borex" in (p.comment or "").lower():
+            if self.owns_position(p):
                 return p
         return None
+
+    def position_by_ticket(self, ticket: int) -> Mt5Position | None:
+        if self.dry_run or ticket <= 0 or self._mt5 is None:
+            return None
+        rows = self._mt5.positions_get(ticket=int(ticket))
+        if not rows:
+            return None
+        p = rows[0]
+        return Mt5Position(
+            ticket=int(p.ticket),
+            symbol=str(p.symbol),
+            side="long" if p.type == 0 else "short",
+            volume=float(p.volume),
+            price_open=float(p.price_open),
+            sl=float(p.sl),
+            tp=float(p.tp),
+            profit=float(p.profit),
+            magic=int(getattr(p, "magic", 0) or 0),
+            comment=str(getattr(p, "comment", "") or ""),
+        )
 
     def _normalize_volume(self, mt5_sym: str, volume: float) -> float:
         info = self._mt5.symbol_info(mt5_sym)
@@ -682,17 +834,25 @@ class Mt5Client:
         if self.dry_run:
             return Mt5OrderResult(ok=True, ticket=ticket, message="dry_run modify")
         mt5 = self._mt5
+        pos = self.position_by_ticket(int(ticket))
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
             "position": int(ticket),
             "sl": float(sl),
             "tp": float(tp),
         }
+        if pos is not None:
+            request["symbol"] = pos.symbol
         result = mt5.order_send(request)
         if result is None:
             return Mt5OrderResult(ok=False, message=str(mt5.last_error()))
         ok = result.retcode == mt5.TRADE_RETCODE_DONE
-        return Mt5OrderResult(ok=ok, ticket=ticket, retcode=int(result.retcode))
+        return Mt5OrderResult(
+            ok=ok,
+            ticket=ticket,
+            retcode=int(result.retcode),
+            message=str(result.comment or f"retcode={result.retcode}"),
+        )
 
     def cancel_order(self, ticket: int) -> Mt5OrderResult:
         if self.dry_run:
@@ -707,3 +867,63 @@ class Mt5Client:
             return Mt5OrderResult(ok=False, message=str(mt5.last_error()))
         ok = result.retcode == mt5.TRADE_RETCODE_DONE
         return Mt5OrderResult(ok=ok, ticket=ticket, retcode=int(result.retcode))
+
+    def close_position(self, yahoo_symbol: str, *, ticket: int | None = None) -> Mt5OrderResult:
+        """Market-close an open position for this service."""
+        if self.dry_run:
+            return Mt5OrderResult(ok=True, ticket=ticket or -3, message="dry_run close")
+        mt5 = self._mt5
+        pos = None
+        if ticket and ticket > 0:
+            rows = mt5.positions_get(ticket=int(ticket))
+            if rows:
+                p = rows[0]
+                pos = Mt5Position(
+                    ticket=int(p.ticket),
+                    symbol=str(p.symbol),
+                    side="long" if p.type == 0 else "short",
+                    volume=float(p.volume),
+                    price_open=float(p.price_open),
+                    sl=float(p.sl),
+                    tp=float(p.tp),
+                    profit=float(p.profit),
+                    magic=int(getattr(p, "magic", 0) or 0),
+                    comment=str(getattr(p, "comment", "") or ""),
+                )
+        if pos is None:
+            pos = self.position_for_ghost(yahoo_symbol)
+        if pos is None:
+            return Mt5OrderResult(ok=False, message=f"no open position for {yahoo_symbol}")
+        mt5_sym = pos.symbol
+        tick = mt5.symbol_info_tick(mt5_sym)
+        if tick is None:
+            return Mt5OrderResult(ok=False, message=f"no tick for {mt5_sym}")
+        if pos.side == "long":
+            order_type = mt5.ORDER_TYPE_SELL
+            price = float(tick.bid)
+        else:
+            order_type = mt5.ORDER_TYPE_BUY
+            price = float(tick.ask)
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": mt5_sym,
+            "position": int(pos.ticket),
+            "volume": float(pos.volume),
+            "type": order_type,
+            "price": price,
+            "deviation": 20,
+            "magic": self.MAGIC,
+            "comment": "borex_flat",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        result = mt5.order_send(request)
+        if result is None:
+            return Mt5OrderResult(ok=False, message=str(mt5.last_error()))
+        ok = result.retcode == mt5.TRADE_RETCODE_DONE
+        return Mt5OrderResult(
+            ok=ok,
+            ticket=int(pos.ticket),
+            message=str(result.comment) if result.comment else f"retcode={result.retcode}",
+            retcode=int(result.retcode),
+        )

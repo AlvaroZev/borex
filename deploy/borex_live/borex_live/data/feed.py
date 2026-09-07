@@ -82,26 +82,23 @@ def bootstrap_candles(
     borex_main_root=None,
 ) -> list[Candle]:
     """
-    Warmup pull order:
-      1. Dukascopy parquet cache (skipped for sub-hour — too large for live LTF)
-      2. MT5 history
-      3. Yahoo Finance (yfinance)
+    Live warmup uses MT5 only when connected. Mixing a stale Dukascopy cache
+    with current MT5 bars changes AOIs/ghost state and breaks live↔theory parity.
+    Offline/dry-run keeps the old cache/fallback order.
 
     ~50 closed bars is enough. If nothing is available, return [] — the pair
     stays in the universe and fills from live MT5 bars.
     """
     need = max(MIN_WARMUP_BARS, int(warmup_bars or MIN_WARMUP_BARS))
     key = interval.strip().lower()
-    skip_duka = key in {"1s", "1m", "5m", "15m", "30m"}
     sources: list[tuple[str, Callable[[], list[Candle]]]] = []
-    if not skip_duka:
-        sources.append(("dukascopy", lambda: _from_dukascopy(yahoo_symbol, interval)))
-    sources.extend(
-        [
-            ("mt5", lambda: _from_mt5(yahoo_symbol, interval, mt5, need)),
-            ("yfinance", lambda: _from_yfinance(yahoo_symbol, interval)),
-        ]
-    )
+    if mt5.connected and not mt5.dry_run:
+        sources.append(("mt5", lambda: _from_mt5(yahoo_symbol, interval, mt5, need)))
+    else:
+        skip_duka = key in {"1s", "1m", "5m", "15m", "30m"}
+        if not skip_duka:
+            sources.append(("dukascopy", lambda: _from_dukascopy(yahoo_symbol, interval)))
+        sources.append(("yfinance", lambda: _from_yfinance(yahoo_symbol, interval)))
 
     best: list[Candle] = []
     best_source = ""
@@ -138,7 +135,7 @@ def bootstrap_candles(
         return _finalize(best, interval, need)
 
     logger.warning(
-        "No warmup data for %s (dukascopy/mt5/yfinance); keeping pair with empty history",
+        "No warmup data for %s; keeping pair with empty history",
         yahoo_symbol,
     )
     return []

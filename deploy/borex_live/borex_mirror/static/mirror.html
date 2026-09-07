@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Borex Mirror</title>
+  <style>
+    :root {
+      --bg: #0f1419; --panel: #1a2332; --border: #2d3a4f;
+      --text: #e7ecf3; --muted: #8b9cb3; --green: #22c55e; --red: #ef4444; --accent: #3b82f6;
+      --yellow: #fbbf24;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); background: var(--panel); }
+    header h1 { font-size: 1.1rem; }
+    .meta { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.5rem; font-size: 0.85rem; color: var(--muted); }
+    main { display: grid; grid-template-columns: 1fr; gap: 1rem; padding: 1rem; }
+    @media (min-width: 1100px) { main { grid-template-columns: 1fr 1fr; } }
+    section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; }
+    h2 { font-size: 0.9rem; margin-bottom: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    th, td { text-align: left; padding: 0.4rem 0.3rem; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    .open { color: var(--accent); }
+    .win { color: var(--green); }
+    .loss { color: var(--red); }
+    .muted { color: var(--muted); }
+    .badge { font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 4px; background: #243044; color: var(--muted); }
+    .badge.ok { color: var(--green); }
+    .badge.bad { color: var(--red); }
+    .badge.theory { color: #c084fc; }
+    .badge.paper { color: var(--yellow); }
+    .matched { color: var(--green); }
+    .theory-only { color: #c084fc; }
+    .live-only { color: var(--yellow); }
+    .note { margin: 0.75rem 1rem 0; padding: 0.55rem 0.75rem; font-size: 0.78rem;
+      color: #a5b4fc; border: 1px solid #3730a3; background: #1e1b4b; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Borex Mirror · theory → market at candle close</h1>
+    <div class="meta" id="meta">Loading…</div>
+  </header>
+  <div class="note" id="note">
+    Theory decides every trade. Real mirrors each open on the same closed bar (market fill, SL/TP at theory pip distances).
+    No ghost wait. Counts must stay 1:1.
+  </div>
+  <main>
+    <section>
+      <h2>Real · open (mirrored)</h2>
+      <table id="open">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Side</th><th>Theory</th><th>Fill</th><th>SL</th><th>TP</th>
+            <th>Float PnL</th><th>Ticket</th><th>Exp W/L</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Theory · open</h2>
+      <table id="theory-open">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP</th>
+            <th>Float PnL</th><th>Margin</th><th>RR</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Real · recent closed</h2>
+      <table id="closed"><thead><tr><th>Symbol</th><th>Side</th><th>PnL</th><th>Reason</th><th>Entry</th></tr></thead><tbody></tbody></table>
+    </section>
+    <section>
+      <h2>Theory · recent closed</h2>
+      <table id="theory-closed"><thead><tr><th>Symbol</th><th>Side</th><th>PnL</th><th>Reason</th><th>Entry</th></tr></thead><tbody></tbody></table>
+    </section>
+    <section style="grid-column: 1 / -1;">
+      <h2>Trade-by-trade comparison (must be MATCH)</h2>
+      <table id="comparison">
+        <thead><tr>
+          <th>Status</th><th>Symbol</th><th>Side</th><th>Entry hour</th>
+          <th>Theory entry</th><th>Real fill</th><th>Δ entry</th>
+          <th>Theory PnL</th><th>Real PnL</th><th>Δ PnL</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+    const n = (v, d=5) => (v == null || Number.isNaN(+v)) ? '-' : (+v).toFixed(d);
+    const usd = (v) => (v == null || Number.isNaN(+v)) ? '-' : ((+v >= 0 ? '+' : '') + '$' + (+v).toFixed(2));
+
+    async function refresh() {
+      const r = await fetch('/api/dashboard');
+      const d = await r.json();
+      const a = d.account || {};
+      const wr = d.win_rate != null ? (d.win_rate * 100).toFixed(1) + '%' : 'n/a';
+      const eq = a.mt5_equity != null ? a.mt5_equity : a.display_equity;
+      const bal = a.mt5_balance;
+      const th = d.theory || {};
+      const opens = d.open_trades || [];
+      const thOpens = th.open_trades || [];
+      const matchHint = opens.length === thOpens.length
+        ? '<span class="badge ok">counts equal</span>'
+        : `<span class="badge bad">counts ${opens.length} vs ${thOpens.length}</span>`;
+      document.getElementById('meta').innerHTML = `
+        <span>Strategy: <strong>${esc(d.runtime?.strategy)}</strong></span>
+        <span>Mode: <strong>mirror</strong> ${matchHint}</span>
+        <span>RR: <strong>${esc(d.runtime?.rr_mode)} ${esc(d.runtime?.min_rr)}×${esc(d.runtime?.rr_factor)}</strong></span>
+        <span>Execute MT5: <strong>${d.runtime?.execute_mt5 ? 'yes' : 'paper'}</strong></span>
+        <span>MT5 equity: <strong>${eq == null ? '—' : '$' + (+eq).toFixed(2)}</strong></span>
+        <span>MT5 balance: <strong>${bal == null ? '—' : '$' + (+bal).toFixed(2)}</strong></span>
+        <span>WR: <strong>${wr}</strong></span>
+        <span>Real open: <strong>${opens.length}</strong></span>
+        <span>Theory equity: <strong>$${(+(th.equity || 0)).toFixed(2)}</strong></span>
+        <span>Theory open: <strong>${thOpens.length}</strong></span>
+        <span>Through: <strong>${esc(th.last_master_ts || '—')}</strong></span>
+        <span>MT5: <strong>${d.runtime?.mt5_connected ? 'ok' : 'off'}</strong></span>`;
+
+      const ot = document.querySelector('#open tbody');
+      ot.innerHTML = opens.map(t => {
+        const pnl = t.floating_pnl;
+        const pnlCls = pnl == null ? '' : (pnl >= 0 ? 'win' : 'loss');
+        const paper = t.paper ? ' <span class="badge paper">paper</span>' : '';
+        return `<tr class="open">
+          <td>${esc(t.symbol)}${paper}</td>
+          <td>${esc(t.side)}</td>
+          <td>${n(t.theory_entry)}</td>
+          <td>${n(t.entry_price)}</td>
+          <td>${n(t.stop_loss)}</td>
+          <td>${n(t.take_profit)}</td>
+          <td class="${pnlCls}">${usd(pnl)}</td>
+          <td>${esc(t.mt5_ticket ?? '-')}</td>
+          <td><span class="win">${usd(t.expected_win_usd)}</span> / <span class="loss">${usd(t.expected_loss_usd && -Math.abs(t.expected_loss_usd))}</span></td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="9" class="muted">None</td></tr>';
+
+      const tot = document.querySelector('#theory-open tbody');
+      tot.innerHTML = thOpens.map(t => {
+        const pnl = t.floating_pnl;
+        const pnlCls = pnl == null ? '' : (pnl >= 0 ? 'win' : 'loss');
+        return `<tr class="theory-only">
+          <td>${esc(t.symbol)}</td><td>${esc(t.side)}</td>
+          <td>${n(t.entry_price)}</td><td>${n(t.stop_loss)}</td><td>${n(t.take_profit)}</td>
+          <td class="${pnlCls}">${usd(pnl)}</td><td>$${(+t.margin).toFixed(2)}</td><td>${n(t.rr_used, 2)}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="8" class="muted">None</td></tr>';
+
+      document.querySelector('#closed tbody').innerHTML =
+        (d.closed_trades || []).map(t => `<tr class="${t.pnl >= 0 ? 'win' : 'loss'}">
+          <td>${esc(t.symbol)}</td><td>${esc(t.side)}</td>
+          <td>${t.pnl >= 0 ? '+' : ''}$${(+t.pnl).toFixed(2)}</td>
+          <td>${esc(t.exit_reason)}</td><td>${esc(t.entry_time || '-')}</td></tr>`).join('')
+        || '<tr><td colspan="5" class="muted">None</td></tr>';
+
+      document.querySelector('#theory-closed tbody').innerHTML =
+        (th.closed_trades || []).map(t => `<tr class="${t.pnl >= 0 ? 'win' : 'loss'}">
+          <td>${esc(t.symbol)}</td><td>${esc(t.side)}</td>
+          <td>${t.pnl >= 0 ? '+' : ''}$${(+t.pnl).toFixed(2)}</td>
+          <td>${esc(t.exit_reason)}</td><td>${esc(t.entry_time || '-')}</td></tr>`).join('')
+        || '<tr><td colspan="5" class="muted">None</td></tr>';
+
+      document.querySelector('#comparison tbody').innerHTML =
+        (th.comparison || []).slice().reverse().map(row => {
+          const label = row.status === 'matched' ? 'MATCH' : (row.status === 'theory_only' ? 'THEORY ONLY' : 'REAL ONLY');
+          const theory = row.theory || {};
+          const live = row.live || {};
+          return `<tr class="${row.status.replace('_', '-')}">
+            <td><span class="badge ${row.status === 'matched' ? 'ok' : (row.status === 'theory_only' ? 'theory' : 'bad')}">${label}</span></td>
+            <td>${esc(row.symbol)}</td><td>${esc(row.side)}</td><td>${esc(row.entry_hour || '-')}</td>
+            <td>${n(theory.entry_price)}</td><td>${n(live.entry_price)}</td><td>${n(row.entry_delta)}</td>
+            <td>${usd(theory.pnl)}</td><td>${usd(live.pnl)}</td><td>${usd(row.pnl_delta)}</td>
+          </tr>`;
+        }).join('') || '<tr><td colspan="10" class="muted">No trades yet</td></tr>';
+    }
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
