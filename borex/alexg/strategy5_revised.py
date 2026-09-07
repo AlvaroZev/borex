@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from borex.alexg.ablation import AblationConfig, video1_default
 from borex.alexg.aoi_setforget import (
     PipAOI,
+    _pip_size,
     aoi_at_close,
     build_pip_aoi_zones,
     stop_beyond_aoi,
@@ -103,6 +104,14 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
     min_aoi_touches: int = 3
     min_aoi_pips: float = 5.0
     max_aoi_pips: float = 60.0
+    cluster_pips: float = 5.0
+    # Expand AOI membership by this many pips when testing close-in-zone.
+    aoi_pad_pips: float = 0.0
+    # If >0, snap OHLC to this pip grid before zone/signal logic (feed align).
+    ohlc_quantize_pips: float = 0.0
+    # Blend this feed's OHLC toward an attached peer series (0=off, 1=replace).
+    # Used by alexg7aligned to sync broker vs Dukascopy decisions.
+    peer_blend: float = 0.0
     sl_buffer_pips: float = 6.0
     min_bars: int = 120
     signal_cooldown: int = 8
@@ -126,9 +135,86 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
     _zones_cache_index: int = field(default=-10**9, repr=False)
     _htf_cache: dict = field(default_factory=dict, repr=False)
     _htf_cache_index: int = field(default=-10**9, repr=False)
+    _quant_id: int = field(default=0, repr=False)
+    _quant_candles: list | None = field(default=None, repr=False)
+    _peer_by_hour: dict = field(default_factory=dict, repr=False)
 
     def set_context(self, symbol: str, market_ctx=None) -> None:
         self._current_symbol = symbol
+
+    def attach_peer_series(self, peer: list[Candle] | None) -> None:
+        """Hour-indexed peer OHLC for peer_blend (clears quantize cache)."""
+        self._peer_by_hour = {}
+        self._quant_id = 0
+        self._quant_candles = None
+        if not peer:
+            return
+        for c in peer:
+            t = c.timestamp
+            try:
+                import pandas as pd
+
+                ts = pd.Timestamp(t)
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+                else:
+                    ts = ts.tz_convert("UTC")
+                key = ts.floor("h")
+            except Exception:
+                key = t
+            self._peer_by_hour[key] = c
+
+    def _quantized(self, candles: list[Candle]) -> list[Candle]:
+        q = float(self.ohlc_quantize_pips or 0.0)
+        blend = float(self.peer_blend or 0.0)
+        if q <= 0 and blend <= 0:
+            return candles
+        cid = id(candles)
+        if self._quant_candles is not None and self._quant_id == cid:
+            return self._quant_candles
+        symbol = self._current_symbol or "EURUSD=X"
+        step = q * _pip_size(symbol) if q > 0 else 0.0
+
+        def snap(x: float) -> float:
+            if step <= 0:
+                return x
+            return round(x / step) * step
+
+        out: list[Candle] = []
+        for c in candles:
+            o, h, l, cl = c.open, c.high, c.low, c.close
+            if blend > 0 and self._peer_by_hour:
+                try:
+                    import pandas as pd
+
+                    ts = pd.Timestamp(c.timestamp)
+                    if ts.tzinfo is None:
+                        ts = ts.tz_localize("UTC")
+                    else:
+                        ts = ts.tz_convert("UTC")
+                    peer = self._peer_by_hour.get(ts.floor("h"))
+                except Exception:
+                    peer = None
+                if peer is not None:
+                    b = min(1.0, max(0.0, blend))
+                    o = (1 - b) * o + b * peer.open
+                    h = (1 - b) * h + b * peer.high
+                    l = (1 - b) * l + b * peer.low
+                    cl = (1 - b) * cl + b * peer.close
+            o, h, l, cl = snap(o), snap(h), snap(l), snap(cl)
+            out.append(
+                Candle(
+                    timestamp=c.timestamp,
+                    open=o,
+                    high=max(o, h, l, cl),
+                    low=min(o, h, l, cl),
+                    close=cl,
+                    volume=c.volume,
+                )
+            )
+        self._quant_id = cid
+        self._quant_candles = out
+        return out
 
     def apply_ablation(self, config: AblationConfig) -> None:
         self.ablation = config
@@ -157,6 +243,7 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
                     max_pips=self.max_aoi_pips,
                     max_age_bars=_DAILY_MAX_AGE,
                     source_tf="daily",
+                    cluster_pips=self.cluster_pips,
                 )
             )
 
@@ -171,6 +258,7 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
                     max_pips=self.max_aoi_pips,
                     max_age_bars=_WEEKLY_MAX_AGE,
                     source_tf="weekly",
+                    cluster_pips=self.cluster_pips,
                 )
             )
         self._zones_cache = zones
@@ -288,6 +376,7 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
         candles: list[Candle],
         mtf: MultiTimeframeContext | None = None,
     ) -> Signal | None:
+        candles = self._quantized(candles)
         symbol = self._current_symbol or "UNKNOWN"
         if index < self.min_bars:
             return None
@@ -322,7 +411,12 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
         if not zones:
             return None
 
-        zone = aoi_at_close(candle, zones)
+        zone = aoi_at_close(
+            candle,
+            zones,
+            pad=self.aoi_pad_pips
+            * _pip_size(symbol if symbol != "UNKNOWN" else "EURUSD=X"),
+        )
         if zone is None:
             return None
 

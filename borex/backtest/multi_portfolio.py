@@ -16,6 +16,11 @@ class MultiMarketPortfolio:
     maintenance_margin_ratio: float = 0.0
     size_mode: str = "margin"
     max_positions: int = 5
+    commission_per_lot: float = 0.0
+    commission_per_trade: float = 0.0
+    min_commission_per_side: float = 0.04
+    lot_notional: float = 100_000.0
+    risk_include_commission: bool = True
     cash: float = field(init=False)
     open_trades: dict[str, Trade] = field(default_factory=dict)
     closed_trades: list[Trade] = field(default_factory=list)
@@ -45,9 +50,7 @@ class MultiMarketPortfolio:
     def _unrealized_pnl(self, trade: Trade, price: float) -> float:
         move = self._pnl_pct(trade, price)
         if self.size_mode == "margin":
-            # Margin accounts liquidate at -margin; never mark worse than that
-            # for equity/drawdown (5000x MTM would otherwise fake 100% DD).
-            return max(-trade.margin, trade.margin * move * self.leverage)
+            return trade.margin * move * self.leverage
         return trade.margin * move
 
     def equity_at_prices(self, prices: dict[str, float]) -> float:
@@ -71,7 +74,22 @@ class MultiMarketPortfolio:
         mode = size_mode or self.size_mode
         uninvested = self.cash
         if mode == "margin":
-            return uninvested * self.position_size_pct
+            risk_budget = uninvested * self.position_size_pct
+            if (
+                self.risk_include_commission
+                and self.commission_per_lot > 0
+                and self.leverage > 0
+            ):
+                from borex.backtest.costs import margin_for_risk_net_commission
+
+                return margin_for_risk_net_commission(
+                    risk_budget,
+                    self.leverage,
+                    commission_per_lot=self.commission_per_lot,
+                    lot_notional=self.lot_notional,
+                    min_commission_per_side=self.min_commission_per_side,
+                )
+            return risk_budget
         cap = min(self.equity * self.position_size_pct, uninvested)
         if risk_per_trade_pct is None:
             return cap
@@ -83,12 +101,20 @@ class MultiMarketPortfolio:
         risk_margin = self.equity * risk_per_trade_pct / (self.leverage * sl_dist_pct)
         return min(risk_margin, cap)
 
+    def book_is_full(self) -> bool:
+        """True when no additional symbol can be opened (cash / cap / dead)."""
+        if self.liquidated or not self.cash:
+            return True
+        if self.max_positions > 0 and len(self.open_trades) >= self.max_positions:
+            return True
+        return self.compute_margin(1.0) <= 0
+
     def can_open(self, symbol: str = "") -> bool:
         if self.liquidated or not self.cash:
             return False
         if symbol and symbol in self.open_trades:
             return False
-        if len(self.open_trades) >= self.max_positions:
+        if self.max_positions > 0 and len(self.open_trades) >= self.max_positions:
             return False
         return self.compute_margin(1.0) > 0
 
@@ -132,6 +158,9 @@ class MultiMarketPortfolio:
 
         side = PositionSide.LONG if action == SignalAction.BUY else PositionSide.SHORT
         self.cash -= margin
+        from borex.alexg.sessions import classify_session
+
+        sess = classify_session(timestamp)
         self.open_trades[symbol] = Trade(
             side=side,
             entry_index=index,
@@ -146,6 +175,7 @@ class MultiMarketPortfolio:
             entry_cash=entry_cash,
             entry_equity=entry_equity,
             sl_armed_from_index=sl_armed_from_index,
+            entry_session=sess.value if sess is not None else "",
         )
         return True
 

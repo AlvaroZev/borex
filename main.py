@@ -17,7 +17,6 @@ from borex.alexg import (
     AlexG6aStrategy,
     AlexG6bStrategy,
     AlexG7Strategy,
-    AlexG8OptimizedStrategy,
     AlexG8Strategy,
     AlexGMarketStrategy,
     AlexGMethodStrategy,
@@ -58,9 +57,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--strategy",
-        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg5revised", "alexg6", "alexg6a", "alexg6b", "alexg6-1m", "alexg7", "alexg8", "alexg8optimized", "alexg-market", "institutional"],
+        choices=["candles", "alexg", "alexg2", "alexg3", "alexg4", "alexg5", "alexg5revised", "alexg6", "alexg6a", "alexg6b", "alexg6-1m", "alexg7", "alexg8", "alexg-market", "institutional"],
         default="candles",
-        help="Estrategia: candles, alexg..alexg8optimized, alexg5revised, alexg6-1m, alexg-market o institutional",
+        help="Estrategia: candles, alexg..alexg8, alexg5revised, alexg6-1m, alexg-market o institutional",
     )
     parser.add_argument(
         "--symbol", "-s", default="EURUSD=X", help="Símbolo principal (yfinance)"
@@ -175,13 +174,13 @@ def parse_args() -> argparse.Namespace:
         "--ltf-intervals",
         nargs="+",
         default=["1m"],
-        help="AlexG8/alexg8optimized: lower TFs for TP-direction confirm at ghost SL (default: 1m; add 1s if cached)",
+        help="Unused (legacy); alexg8 no longer uses LTF confirm",
     )
     parser.add_argument(
         "--ltf-confirm-mode",
         choices=["any", "all"],
         default="any",
-        help="AlexG8/alexg8optimized: any=at least one LTF confirms; all=every available LTF must confirm",
+        help="Unused (legacy); alexg8 no longer uses LTF confirm",
     )
     parser.add_argument(
         "--ghost-sl-mult",
@@ -444,16 +443,6 @@ def _build_strategy(args: argparse.Namespace) -> Strategy:
         return AlexG8Strategy(
             min_rr=args.min_rr,
             execution_interval=args.interval,
-            ltf_intervals=tuple(args.ltf_intervals),
-            ltf_confirm_mode=args.ltf_confirm_mode,
-            ghost_sl_mult=args.ghost_sl_mult,
-        )
-    if args.strategy == "alexg8optimized":
-        return AlexG8OptimizedStrategy(
-            min_rr=args.min_rr,
-            execution_interval=args.interval,
-            ltf_intervals=tuple(args.ltf_intervals),
-            ltf_confirm_mode=args.ltf_confirm_mode,
             ghost_sl_mult=args.ghost_sl_mult,
         )
     if args.strategy == "alexg6":
@@ -554,7 +543,6 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
         "alexg6-1m",
         "alexg7",
         "alexg8",
-        "alexg8optimized",
         "alexg-market",
     )
     if args.strategy in (
@@ -583,39 +571,6 @@ def _build_config(args: argparse.Namespace) -> BacktestConfig:
     )
 
 
-def _attach_ltf_for_alexg8(
-    strategy: AlexG8Strategy,
-    symbols: list[str],
-    period: str,
-    cache_mode: str,
-) -> None:
-    """Preload 1m/1s series used to confirm ghost fills move toward TP."""
-    ltf_by_symbol: dict[str, dict] = {}
-    n = len(symbols)
-    for i, sym in enumerate(symbols, 1):
-        by_tf: dict = {}
-        for tf in strategy.ltf_intervals:
-            try:
-                series = load_market_data(sym, period, tf, cache_mode=cache_mode)
-                by_tf[tf] = series
-                print(
-                    f"  LTF [{i}/{n}] {sym} {tf}: {len(series)} bars",
-                    flush=True,
-                )
-            except Exception as exc:
-                print(f"  LTF omitido {sym} {tf}: {exc}", file=sys.stderr)
-        if by_tf:
-            ltf_by_symbol[sym] = by_tf
-    print("  Indexing LTF series…", flush=True)
-    strategy.attach_ltf(ltf_by_symbol)
-    loaded = sum(len(v) for v in ltf_by_symbol.values())
-    print(
-        f"AlexG8 LTF: {len(ltf_by_symbol)} pairs, {loaded} series "
-        f"({', '.join(strategy.ltf_intervals)}; mode={strategy.ltf_confirm_mode})",
-        flush=True,
-    )
-
-
 def _run_alexg3(args: argparse.Namespace) -> int:
     cache_mode = _cache_mode(args)
     universe = args.symbols if args.symbols else default_forex_universe()
@@ -640,17 +595,6 @@ def _run_alexg3(args: argparse.Namespace) -> int:
 
     master = pick_master_symbol(candles_by_symbol, args.symbol)
     strategy = _build_strategy(args)
-    if isinstance(strategy, AlexG8OptimizedStrategy):
-        strategy.configure_lazy_ltf(args.period, cache_mode)
-        print(
-            f"AlexG8Optimized: lazy LTF ({', '.join(strategy.ltf_intervals)}; "
-            f"mode={strategy.ltf_confirm_mode}) — load only near SL fills",
-            flush=True,
-        )
-    elif isinstance(strategy, AlexG8Strategy):
-        _attach_ltf_for_alexg8(
-            strategy, list(candles_by_symbol.keys()), args.period, cache_mode
-        )
     config = _build_config(args)
     engine = MultiMarketEngine(
         strategy, config, max_positions=args.max_positions
@@ -662,8 +606,6 @@ def _run_alexg3(args: argparse.Namespace) -> int:
     )
 
     print(result.summary())
-    if isinstance(strategy, AlexG8OptimizedStrategy):
-        print(strategy.ltf_stats_summary())
     print(f"Pares cargados: {len(result.symbols)} (master: {result.master_symbol})")
     print(f"Velas master: {len(candles_by_symbol[master])}")
     print()
@@ -686,7 +628,7 @@ def main() -> int:
     args = parse_args()
     use_mtf = args.mtf or args.strategy in ("alexg", "alexg2", "institutional")
 
-    if args.strategy in ("alexg3", "alexg4", "alexg5", "alexg5revised", "alexg6", "alexg6a", "alexg6b", "alexg6-1m", "alexg7", "alexg8", "alexg8optimized", "alexg-market"):
+    if args.strategy in ("alexg3", "alexg4", "alexg5", "alexg5revised", "alexg6", "alexg6a", "alexg6b", "alexg6-1m", "alexg7", "alexg8", "alexg-market"):
         return _run_alexg3(args)
 
     mtf = None
@@ -737,7 +679,6 @@ def main() -> int:
             "alexg6-1m",
             "alexg7",
             "alexg8",
-            "alexg8optimized",
             "alexg-market",
         )
         else 60

@@ -252,6 +252,7 @@ def load_analysis_bundle(
         timeframe=manifest.get("timeframe", ""),
         saved_at=manifest.get("saved_at", ""),
         source_path=str(in_dir.resolve()),
+        strategy_params=dict(manifest.get("strategy_params") or {}),
     )
     return analysis
 

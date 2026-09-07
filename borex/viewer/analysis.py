@@ -56,7 +56,7 @@ def strategy_params(strategy: AlexG3Strategy) -> dict[str, Any]:
         "min_confirming_pairs": getattr(strategy, "min_confirming_pairs", 0),
         "require_currency_filter": getattr(strategy, "require_currency_filter", False),
         "filter_false_positives": getattr(strategy, "filter_false_positives", True),
-        "disabled_signals": getattr(strategy, "disabled_signals", ()),
+        "disabled_signals": list(getattr(strategy, "disabled_signals", ()) or ()),
         "name": getattr(strategy, "name", "unknown"),
     }
     sl_wait = getattr(strategy, "sl_wait_max_bars", None)
@@ -66,6 +66,40 @@ def strategy_params(strategy: AlexG3Strategy) -> dict[str, Any]:
     if second_signal is not None:
         params["second_signal"] = second_signal
     return params
+
+
+_SIGNAL_PARAM_KEYS = (
+    "min_rr",
+    "strength_lookback",
+    "min_currency_edge",
+    "min_confirming_pairs",
+    "filter_false_positives",
+    "second_signal",
+    "name",
+)
+
+
+def warn_decision_param_mismatch(
+    saved: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> None:
+    """Warn when --load-analysis strategy params differ from the current CLI."""
+    if not saved:
+        return
+    diffs = []
+    for key in _SIGNAL_PARAM_KEYS:
+        if key not in saved:
+            continue
+        if saved.get(key) != current.get(key):
+            diffs.append(f"{key}: saved={saved.get(key)!r} now={current.get(key)!r}")
+    if diffs:
+        print(
+            "[warn] loaded decisions were scanned with different strategy params:\n  "
+            + "\n  ".join(diffs)
+            + "\n  Re-scan (omit --load-analysis) if signals should change.",
+            flush=True,
+            file=sys.stderr,
+        )
 
 
 def latest_aoi_levels(
@@ -129,6 +163,7 @@ class MarketAnalysis:
     timeframe: str = ""
     saved_at: str = ""
     source_path: str = ""
+    strategy_params: dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_decisions(self) -> int:

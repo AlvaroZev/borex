@@ -32,7 +32,6 @@ _ALEXG_LATE = (
     "alexg6-1m",
     "alexg7",
     "alexg8",
-    "alexg8optimized",
     "alexg5revised",
     "alexg-market",
 )

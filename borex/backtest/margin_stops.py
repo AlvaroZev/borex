@@ -34,6 +34,10 @@ def resolve_rr(
     fixed_rr: float = 3.0,
     winrate: float | None = None,
     rr_factor: float = 1.0,
+    closed_trades: int | None = None,
+    winrate_min_trades: int = 20,
+    rr_min: float = 0.0,
+    rr_max: float = 0.0,
 ) -> float:
     """
     Resolve take-profit RR for margin / true-SL exits.
@@ -41,16 +45,37 @@ def resolve_rr(
     - fixed: use ``fixed_rr`` (default 3)
     - dynamic: ``1 / winrate`` (falls back to ``fixed_rr`` before history)
     Both modes are multiplied by ``rr_factor`` (TP multiplier).
+
+    ``rr_min`` / ``rr_max``: optional clamps after the factor (0 = disabled).
+    Example: dynamic with min 2 and max 6 keeps TP between 2:1 and 6:1.
+
+    ``winrate_min_trades``: ignore sample WR until this many closed trades.
+    Tiny n makes ``1/wr`` swing 1.88↔5.64 and live cannot see backtest-only
+    outcomes — treat as "no history" so live and theory stay aligned early.
     """
+    wr = winrate
+    if (
+        closed_trades is not None
+        and winrate_min_trades > 0
+        and int(closed_trades) < int(winrate_min_trades)
+    ):
+        wr = None
     mode = (rr_mode or "fixed").strip().lower()
     if mode == "dynamic":
-        base = rr_from_winrate(winrate, fixed_rr)
+        base = rr_from_winrate(wr, fixed_rr)
     elif mode == "fixed":
         base = fixed_rr if fixed_rr > 0 else 3.0
     else:
         raise ValueError(f"Unknown rr_mode: {rr_mode!r}. Use 'fixed' or 'dynamic'.")
     factor = rr_factor if rr_factor > 0 else 1.0
-    return base * factor
+    rr = base * factor
+    lo = float(rr_min or 0.0)
+    hi = float(rr_max or 0.0)
+    if lo > 0:
+        rr = max(rr, lo)
+    if hi > 0:
+        rr = min(rr, hi)
+    return rr
 
 
 def tighten_sl_to_margin_stop(

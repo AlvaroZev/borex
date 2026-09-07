@@ -49,6 +49,73 @@ def test_resolve_rr_rejects_bad_mode():
         resolve_rr(rr_mode="weird", fixed_rr=3.0)
 
 
+def test_resolve_rr_dynamic_clamps_min_max():
+    # 10% WR → 10:1, capped at 6
+    assert resolve_rr(
+        rr_mode="dynamic",
+        fixed_rr=2.0,
+        winrate=0.10,
+        rr_factor=1.0,
+        rr_min=2.0,
+        rr_max=6.0,
+    ) == 6.0
+    # 80% WR → 1.25:1, floored at 2
+    assert resolve_rr(
+        rr_mode="dynamic",
+        fixed_rr=2.0,
+        winrate=0.80,
+        rr_factor=1.0,
+        rr_min=2.0,
+        rr_max=6.0,
+    ) == 2.0
+    # 25% WR → 4:1, inside the band
+    assert resolve_rr(
+        rr_mode="dynamic",
+        fixed_rr=2.0,
+        winrate=0.25,
+        rr_factor=1.0,
+        rr_min=2.0,
+        rr_max=6.0,
+    ) == 4.0
+    # 0 = no clamp (legacy)
+    assert resolve_rr(
+        rr_mode="dynamic",
+        fixed_rr=2.0,
+        winrate=0.10,
+        rr_factor=1.0,
+    ) == 10.0
+
+
+def test_resolve_rr_ignores_tiny_winrate_sample():
+    # 2 losses → WR=0 would otherwise keep default; 2 wins would collapse RR.
+    assert resolve_rr(
+        rr_mode="dynamic",
+        fixed_rr=3.0,
+        winrate=1.0,
+        rr_factor=1.88,
+        closed_trades=2,
+        winrate_min_trades=20,
+    ) == pytest.approx(5.64)
+    assert resolve_rr(
+        rr_mode="dynamic",
+        fixed_rr=3.0,
+        winrate=1.0,
+        rr_factor=1.88,
+        closed_trades=20,
+        winrate_min_trades=20,
+    ) == pytest.approx(1.88)
+
+
+def test_alexg7aligned_ghost_fill_at_close():
+    from borex.alexg import AlexG7AlignedStrategy, AlexG8Strategy
+
+    assert AlexG7AlignedStrategy().ghost_fill_at_close is True
+    assert AlexG8Strategy().ghost_fill_at_close is True
+    from borex.alexg.strategy7 import AlexG7Strategy
+
+    assert AlexG7Strategy().ghost_fill_at_close is False
+
+
 def test_ablation_grid_is_400():
     grid = iter_ablation_grid()
     assert len(grid) == 400
@@ -85,13 +152,108 @@ def test_alexg7_defaults_to_video2_ghost():
     assert s.ablation.require_ghost_sl_entry is True
 
 
-def test_alexg8_inherits_video2_ghost():
-    from borex.alexg import AlexG8Strategy
+def test_alexg8_is_aligned_all_sessions():
+    from borex.alexg import AlexG7AlignedStrategy, AlexG8Strategy
+    from borex.alexg.ablation import video2_ghost_all_sessions
 
     s = AlexG8Strategy()
     assert s.name == "alexg8"
-    assert s.ablation == video2_ghost()
-    assert s.ltf_intervals == ("1m",)
+    assert s.ablation == video2_ghost_all_sessions()
+    assert s.ablation.session == "all"
+    assert s.ablation.require_ghost_sl_entry is True
+    # Same geometry as alexg7aligned
+    a = AlexG7AlignedStrategy()
+    assert s.ghost_sl_mult == a.ghost_sl_mult
+    assert s.aoi_pad_pips == a.aoi_pad_pips
+    assert s.sl_buffer_pips == a.sl_buffer_pips
+    assert a.ablation.session == "overlap"
+    assert a.ghost_fill_at_close is True
+    assert s.ghost_fill_at_close is True
+
+
+def test_alexg9_extends_g8():
+    from borex.alexg import AlexG8Strategy, AlexG9Strategy
+
+    s = AlexG9Strategy()
+    g8 = AlexG8Strategy()
+    assert s.name == "alexg9"
+    assert s.ablation.session == "all"
+    assert s.ghost_sl_mult == g8.ghost_sl_mult
+
+
+def test_force_flat_is_origin_session_not_fixed_utc():
+    from types import SimpleNamespace
+    from datetime import datetime, timezone
+
+    from borex.alexg.force_flat import blocks_new_entries, force_flat_reason
+    from borex.alexg.sessions import classify_session, session_close_hour
+    from borex.backtest.engine import BacktestConfig
+
+    cfg = BacktestConfig(force_flat_friday=True, force_flat_daily=True)
+    thu_london_close = datetime(2026, 8, 20, 16, 0, tzinfo=timezone.utc)
+    thu_london_last = datetime(2026, 8, 20, 15, 0, tzinfo=timezone.utc)
+    thu_ny_close = datetime(2026, 8, 20, 21, 0, tzinfo=timezone.utc)
+    thu_asia_close = datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc)
+    thu_mid = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+    old_global = datetime(2026, 8, 20, 19, 0, tzinfo=timezone.utc)
+    fri_ny_close = datetime(2026, 8, 21, 21, 0, tzinfo=timezone.utc)
+    fri_london_close = datetime(2026, 8, 21, 16, 0, tzinfo=timezone.utc)
+
+    london = SimpleNamespace(entry_session="london", entry_time=datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc))
+    ny = SimpleNamespace(entry_session="newyork", entry_time=datetime(2026, 8, 20, 17, 0, tzinfo=timezone.utc))
+    asia = SimpleNamespace(entry_session="asia", entry_time=datetime(2026, 8, 20, 2, 0, tzinfo=timezone.utc))
+    overlap = SimpleNamespace(entry_session="overlap", entry_time=datetime(2026, 8, 20, 13, 0, tzinfo=timezone.utc))
+
+    assert classify_session(london.entry_time).value == "london"
+    assert session_close_hour("london") == 16
+    assert session_close_hour("newyork") == 21
+    assert session_close_hour("asia") == 9
+    assert session_close_hour("overlap") == 16
+
+    # Last in-session hour still trades; flatten on the close-hour bar.
+    assert force_flat_reason(thu_london_last, cfg, trade=london) is None
+    assert force_flat_reason(thu_london_close, cfg, trade=london) == "daily_close"
+    assert force_flat_reason(old_global, cfg, trade=london) is None
+    assert force_flat_reason(thu_ny_close, cfg, trade=london) is None
+    assert force_flat_reason(thu_ny_close, cfg, trade=ny) == "daily_close"
+    assert force_flat_reason(thu_asia_close, cfg, trade=asia) == "daily_close"
+    assert force_flat_reason(thu_london_close, cfg, trade=overlap) == "daily_close"
+    assert force_flat_reason(thu_mid, cfg, trade=london) is None
+
+    # Friday: London session-closes at 16:00; leftovers flatten at NY 21:00.
+    assert force_flat_reason(fri_london_close, cfg, trade=london) == "daily_close"
+    assert force_flat_reason(fri_ny_close, cfg, trade=ny) == "friday_close"
+    assert force_flat_reason(fri_ny_close, cfg, trade=london) == "friday_close"
+
+    assert blocks_new_entries(thu_london_close, cfg) is False  # NY still open
+    assert blocks_new_entries(thu_london_last, cfg) is False
+    assert blocks_new_entries(thu_ny_close, cfg) is True
+    assert blocks_new_entries(old_global, cfg) is False
+    assert blocks_new_entries(thu_mid, cfg) is False
+
+    off = BacktestConfig(force_flat_friday=True, force_flat_daily=False)
+    assert force_flat_reason(thu_london_close, off, trade=london) is None
+    assert force_flat_reason(fri_ny_close, off, trade=ny) == "friday_close"
+
+
+def test_commission_at_entry_charges_on_open():
+    from borex.backtest.multi_portfolio import MultiMarketPortfolio
+    from borex.backtest.costs import commission_for_margin
+
+    portfolio = MultiMarketPortfolio(
+        initial_capital=1000.0,
+        position_size_pct=0.01,
+        leverage=5000.0,
+        size_mode="margin",
+        commission_per_lot=7.0,
+        risk_include_commission=False,
+    )
+    margin = portfolio.compute_margin(1.1)
+    assert margin == pytest.approx(10.0, rel=1e-3)
+    comm = commission_for_margin(margin, 5000.0, commission_per_lot=7.0)
+    assert comm > 0
+    portfolio.charge_commission(comm)
+    assert portfolio.cash == pytest.approx(1000.0 - comm, rel=1e-3)
 
 
 def test_session_overlap_utc():
