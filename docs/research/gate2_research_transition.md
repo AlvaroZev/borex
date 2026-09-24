@@ -61,3 +61,13 @@ Prior N1 evidence (alexg8, ghost_sl_mult=4.0, H1→1m closest-sim, lev 500):
 Next hypothesis: July failure is expectancy degradation inside the same
 daily_close-dominated regime, not throughput collapse — tested first via
 read-only forensic comparison of existing run artifacts.
+
+### Forensic executed (2026-09-24)
+
+```text
+data/runs/research/n1_jul_forensic_20260924_134848/
+```
+
+Verdict: hypothesis supported by existing artifacts (no throughput collapse;
+similar daily_close-dominated mix; worse mean trade PnL; higher margin_stop
+share vs August). Does **not** establish a fix or profitability.
