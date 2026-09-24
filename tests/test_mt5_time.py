@@ -39,6 +39,20 @@ def test_snap_server_offset_to_whole_hours():
     assert ts == datetime(2026, 8, 29, 12, 0, tzinfo=timezone.utc)
 
 
+def test_assess_server_offset_rejects_stale_friday_tick():
+    from borex.data.mt5_time import assess_server_offset
+
+    # Mirrors g2p_20260921_174237 freeze failure mode
+    now = 1_790_012_557
+    stale = 1_789_775_819
+    ao = assess_server_offset(
+        tick_time_unix_raw=stale, local_utc_unix=now, max_age_seconds=120, symbol="EURUSD"
+    )
+    assert ao.confident is False
+    assert ao.offset_seconds is None
+
+
+
 def test_icmarkets_spread_clamp_rejects_weekend_blowout():
     from borex.backtest.costs import (
         clamp_spread_pips,
