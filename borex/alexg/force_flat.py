@@ -56,9 +56,25 @@ def _trade_session(trade: Any) -> TradingSession | None:
         except ValueError:
             pass
     entry = getattr(trade, "entry_time", None)
-    if entry is None:
+    if entry is None or entry == "":
         return None
-    return classify_session(entry)
+    try:
+        import pandas as pd
+
+        if pd.isna(entry):
+            return None
+        # Empty / invalid strings become NaT and crash classify_session(timetz).
+        if isinstance(entry, str) and not str(entry).strip():
+            return None
+        ts = pd.Timestamp(entry)
+        if pd.isna(ts):
+            return None
+    except Exception:
+        return None
+    try:
+        return classify_session(entry)
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 def _friday_flat_hour(config: Any) -> int:

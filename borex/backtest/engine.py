@@ -43,6 +43,8 @@ class BacktestConfig:
     close_on_opposite_signal: bool = False
     true_sl: bool = False  # SL at margin wipe; TP at true_sl_rr
     true_sl_rr: float = 3.0
+    # When True, keep strategy-provided stop_loss/take_profit (no margin/RR rewrite).
+    honor_signal_stops: bool = False
     rr_mode: str = "fixed"  # fixed | dynamic (1/winrate)
     rr_factor: float = 1.0  # TP multiplier on resolved RR (fixed or dynamic)
     # Clamp resolved RR after rr_factor (0 = no clamp).
@@ -480,7 +482,9 @@ class BacktestEngine:
                     exec_price, stop_loss, take_profit
                 )
 
-            if self.config.true_sl and self.config.size_mode == "margin":
+            if self.config.honor_signal_stops and stop_loss is not None and take_profit is not None:
+                pass  # keep strategy SL/TP (e.g. alexg10 entry→ghost-SL)
+            elif self.config.true_sl and self.config.size_mode == "margin":
                 stop_loss, take_profit = margin_stop_out_prices(
                     exec_price,
                     side,

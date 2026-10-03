@@ -374,7 +374,13 @@ class MultiMarketEngine:
                 exec_price, stop_loss, take_profit
             )
 
-        if self.config.true_sl and self.config.size_mode == "margin":
+        if (
+            self.config.honor_signal_stops
+            and stop_loss is not None
+            and take_profit is not None
+        ):
+            pass  # keep strategy SL/TP (e.g. alexg10 entry→ghost-SL)
+        elif self.config.true_sl and self.config.size_mode == "margin":
             stop_loss, take_profit = margin_stop_out_prices(
                 exec_price, side, self.config.leverage, rr
             )

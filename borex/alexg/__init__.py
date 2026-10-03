@@ -8,6 +8,7 @@ from borex.alexg.strategy7 import AlexG7Strategy
 from borex.alexg.strategy7_aligned import AlexG7AlignedStrategy
 from borex.alexg.strategy8 import AlexG8Strategy
 from borex.alexg.strategy9 import AlexG9Strategy
+from borex.alexg.strategy10 import AlexG10Strategy
 from borex.alexg.strategy_market import AlexGMarketStrategy
 from borex.alexg.strategy import AlexGMethodStrategy
 from borex.alexg.strategy2 import AlexG2Strategy
@@ -29,5 +30,6 @@ __all__ = [
     "AlexG7AlignedStrategy",
     "AlexG8Strategy",
     "AlexG9Strategy",
+    "AlexG10Strategy",
     "AlexGMarketStrategy",
 ]
