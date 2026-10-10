@@ -133,8 +133,13 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
     )
     _zones_cache: list = field(default_factory=list, repr=False)
     _zones_cache_index: int = field(default=-10**9, repr=False)
+    # Owner symbol for the shared zone cache. MultiMarketEngine reuses one
+    # strategy instance across pairs; without this guard, symbol A's AOI is
+    # incorrectly reused for symbol B within zone_refresh_bars.
+    _zones_cache_symbol: str = field(default="", repr=False)
     _htf_cache: dict = field(default_factory=dict, repr=False)
     _htf_cache_index: int = field(default=-10**9, repr=False)
+    _htf_cache_symbol: str = field(default="", repr=False)
     _quant_id: int = field(default=0, repr=False)
     _quant_candles: list | None = field(default=None, repr=False)
     _peer_by_hour: dict = field(default_factory=dict, repr=False)
@@ -221,14 +226,15 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
 
     def _build_zones(self, candles: list[Candle], index: int) -> list[PipAOI]:
         refresh = max(1, self.zone_refresh_bars)
+        symbol = self._current_symbol or "EURUSD=X"
         if (
             self._zones_cache
+            and self._zones_cache_symbol == symbol
             and index - self._zones_cache_index < refresh
             and index >= self._zones_cache_index
         ):
             return self._zones_cache
 
-        symbol = self._current_symbol or "EURUSD=X"
         window = candles[: index + 1]
         zones: list[PipAOI] = []
 
@@ -263,12 +269,15 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
             )
         self._zones_cache = zones
         self._zones_cache_index = index
+        self._zones_cache_symbol = symbol
         return zones
 
     def _htf_frames(self, candles: list[Candle], index: int) -> dict[str, list[Candle]]:
         refresh = max(1, self.zone_refresh_bars)
+        symbol = self._current_symbol or "EURUSD=X"
         if (
             self._htf_cache
+            and self._htf_cache_symbol == symbol
             and index - self._htf_cache_index < refresh
             and index >= self._htf_cache_index
         ):
@@ -281,6 +290,7 @@ class AlexG5RevisedStrategy(GhostSLEntryMixin, Strategy):
         }
         self._htf_cache = frames
         self._htf_cache_index = index
+        self._htf_cache_symbol = symbol
         return frames
 
     def _htf_bias_ok(self, candles: list[Candle], index: int, action: SignalAction) -> bool:
